@@ -10,6 +10,8 @@ if ($method === 'PUT') {
         jsonResponse("error", "Invalid or missing student ID.", [], 400);
     }
 
+    $action = $_GET['action'] ?? 'approve'; // Default to approve if action is not specified
+
     $user = authenticate('admin');
 
     $data = json_decode(file_get_contents("php://input"), true);
@@ -31,29 +33,58 @@ if ($method === 'PUT') {
             jsonResponse("error", "Admin not found.", [], 404);
         }
 
-        $checkApproval = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
-        $checkApproval->execute([$studentId]);
-        $approval = $checkApproval->fetch();
-        if ($approval && $approval['approved'] == 1) {
-            jsonResponse("error", "Student already approved.", [], 400);
+        if ($action === 'approve') {
+            $checkApproval = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
+            $checkApproval->execute([$studentId]);
+            $approval = $checkApproval->fetch();
+            if ($approval && $approval['approved'] == 1) {
+                jsonResponse("error", "Student already approved.", [], 400);
+            }
+
+            $stmt = $pdo->prepare("
+                INSERT INTO approvals (student_id, admin_id, approved, approval_date)
+                VALUES (?, ?, 1, NOW())
+                ON DUPLICATE KEY UPDATE
+                admin_id = ?, approved = 1, approval_date = NOW()
+            ");
+            $stmt->execute([$studentId, $adminId, $adminId]);
+
+            // Trigger notification
+            $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+            $stmt->execute([$studentId, "Your registration has been approved. Please upload documents and make payment."]);
+
+            jsonResponse("success", "Student approved successfully.", ["student_id" => $studentId]);
+        } elseif ($action === 'reject') {
+            $checkApproval = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
+            $checkApproval->execute([$studentId]);
+            $approval = $checkApproval->fetch();
+            if ($approval && $approval['approved'] == 1) {
+                jsonResponse("error", "Student already approved, cannot reject.", [], 400);
+            }
+
+            // Delete the student and related records
+            $pdo->beginTransaction();
+
+            $stmt = $pdo->prepare("DELETE FROM approvals WHERE student_id = ?");
+            $stmt->execute([$studentId]);
+
+            $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?");
+            $stmt->execute([$studentId]);
+
+            $pdo->commit();
+
+            // Trigger notification (optional)
+            $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+            $stmt->execute([$studentId, "Your registration has been rejected."]);
+
+            jsonResponse("success", "Student rejected successfully.", ["student_id" => $studentId]);
+        } else {
+            jsonResponse("error", "Invalid action.", [], 400);
         }
-
-        $stmt = $pdo->prepare("
-            INSERT INTO approvals (student_id, admin_id, approved, approval_date)
-            VALUES (?, ?, 1, NOW())
-            ON DUPLICATE KEY UPDATE
-            admin_id = ?, approved = 1, approval_date = NOW()
-        ");
-        $stmt->execute([$studentId, $adminId, $adminId]);
-
-        // Trigger notification
-        $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
-        $stmt->execute([$studentId, "Your registration has been approved. Please upload documents and make payment."]);
-
-        jsonResponse("success", "Student approved successfully.", ["student_id" => $studentId]);
     } catch (PDOException $e) {
-        $log->error("Approval failed: " . $e->getMessage());
-        jsonResponse("error", "Approval failed.", [], 500);
+        $pdo->rollBack();
+        $log->error("Approval/Rejection failed: " . $e->getMessage());
+        jsonResponse("error", "Operation failed: " . $e->getMessage(), [], 500);
     }
 } elseif ($method === 'GET' && isset($_GET['pending'])) {
     $user = authenticate('admin');
@@ -62,28 +93,43 @@ if ($method === 'PUT') {
     $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 10;
     $offset = ($page - 1) * $limit;
 
-    $stmt = $pdo->prepare("
-        SELECT s.id, s.name, s.email, s.program 
-        FROM students s
-        LEFT JOIN approvals a ON s.id = a.student_id
-        WHERE a.approved = 0 OR a.approved IS NULL
-        LIMIT ? OFFSET ?
-    ");
-    $stmt->execute([$limit, $offset]);
-    $pending = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    try {
+        // Log the request parameters for debugging
+        $log->info("Fetching pending approvals with page: $page, limit: $limit, offset: $offset");
 
-    $stmt = $pdo->query("
-        SELECT COUNT(*) 
-        FROM students s
-        LEFT JOIN approvals a ON s.id = a.student_id
-        WHERE a.approved = 0 OR a.approved IS NULL
-    ");
-    $total = $stmt->fetchColumn();
+        // Use positional placeholders (?) instead of named placeholders to avoid binding issues
+        $stmt = $pdo->prepare("
+            SELECT s.id, s.name, s.email, s.program 
+            FROM students s
+            LEFT JOIN approvals a ON s.id = a.student_id
+            WHERE a.approved = 0 OR a.approved IS NULL
+            LIMIT ? OFFSET ?
+        ");
+        $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
+        $stmt->bindValue(2, (int)$offset, PDO::PARAM_INT);
+        $stmt->execute();
+        $pending = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    jsonResponse("success", "Pending approvals retrieved successfully.", [
-        "pending" => $pending,
-        "meta" => ["page" => $page, "limit" => $limit, "total" => $total]
-    ]);
+        // Log the fetched data
+        $log->info("Pending students fetched: " . json_encode($pending));
+
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) 
+            FROM students s
+            LEFT JOIN approvals a ON s.id = a.student_id
+            WHERE a.approved = 0 OR a.approved IS NULL
+        ");
+        $stmt->execute();
+        $total = $stmt->fetchColumn();
+
+        jsonResponse("success", "Pending approvals retrieved successfully.", [
+            "pending" => $pending,
+            "meta" => ["page" => $page, "limit" => $limit, "total" => $total]
+        ]);
+    } catch (PDOException $e) {
+        $log->error("Failed to fetch pending approvals: " . $e->getMessage());
+        jsonResponse("error", "Failed to fetch pending approvals: " . $e->getMessage(), [], 500);
+    }
 } else {
     jsonResponse("error", "Method not allowed.", [], 405);
 }
