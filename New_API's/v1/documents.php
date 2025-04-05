@@ -3,7 +3,49 @@ require '../config.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
 
-if ($method === 'POST') {
+if ($method === 'GET') {
+    $user = authenticate();
+    if ($user->role !== 'admin') {
+        jsonResponse("error", "Only admins can access this endpoint.", [], 403);
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT d.id, s.name AS student, d.document_path, d.upload_date, d.file_size, d.file_type, COALESCE(d.document_type, 'N/A') AS document_type, COALESCE(d.status, 'pending') AS status
+            FROM documents d
+            JOIN students s ON d.student_id = s.id
+        ");
+        $stmt->execute();
+        $documents = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $formattedDocuments = array_map(function ($doc) {
+            return [
+                'id' => $doc['id'],
+                'student' => $doc['student'] ?? 'Unknown',
+                'document_name' => basename($doc['document_path']),
+                'document_path' => $doc['document_path'],
+                'upload_date' => $doc['upload_date'],
+                'file_type' => $doc['file_type'],
+                'document_type' => $doc['document_type'],
+                'status' => $doc['status'],
+            ];
+        }, $documents);
+
+        $total = count($documents);
+        $verified = count(array_filter($documents, fn($d) => $d['status'] === 'verified'));
+        $pending = $total - $verified;
+
+        jsonResponse("success", "Documents retrieved successfully.", [
+            'documents' => $formattedDocuments,
+            'total' => $total,
+            'verified' => $verified,
+            'pending' => $pending,
+        ], 200);
+    } catch (PDOException $e) {
+        $log->error("Failed to fetch documents: " . $e->getMessage());
+        jsonResponse("error", "Failed to fetch documents: " . $e->getMessage(), [], 500);
+    }
+} elseif ($method === 'POST') {
     $user = authenticate();
 
     if (!isset($_FILES['document']) || !isset($_POST['student_id'])) {
@@ -72,7 +114,7 @@ if ($method === 'POST') {
 
     if (move_uploaded_file($fileTmpName, $targetFilePath)) {
         try {
-            $stmt = $pdo->prepare("INSERT INTO documents (student_id, document_path, upload_date, file_size, file_type) VALUES (?, ?, NOW(), ?, ?)");
+            $stmt = $pdo->prepare("INSERT INTO documents (student_id, document_path, upload_date, file_size, file_type, status) VALUES (?, ?, NOW(), ?, ?, 'pending')");
             $stmt->execute([$studentId, $targetFilePath, $fileSize, $fileType]);
             $documentId = $pdo->lastInsertId();
 
@@ -87,6 +129,33 @@ if ($method === 'POST') {
         }
     } else {
         jsonResponse("error", "Failed to move uploaded file.", [], 500);
+    }
+} elseif ($method === 'PUT') {
+    $user = authenticate();
+    if ($user->role !== 'admin') {
+        jsonResponse("error", "Only admins can update document status.", [], 403);
+    }
+
+    $data = json_decode(file_get_contents("php://input"), true);
+    $documentId = $data['id'] ?? null;
+    $status = $data['status'] ?? null;
+
+    if (!$documentId || !in_array($status, ['pending', 'verified'])) {
+        jsonResponse("error", "Invalid document ID or status.", [], 400);
+    }
+
+    try {
+        $stmt = $pdo->prepare("UPDATE documents SET status = ? WHERE id = ?");
+        $stmt->execute([$status, $documentId]);
+
+        if ($stmt->rowCount() === 0) {
+            jsonResponse("error", "Document not found or no changes made.", [], 404);
+        }
+
+        jsonResponse("success", "Document status updated successfully.", [], 200);
+    } catch (PDOException $e) {
+        $log->error("Failed to update document status: " . $e->getMessage());
+        jsonResponse("error", "Failed to update document status: " . $e->getMessage(), [], 500);
     }
 } else {
     jsonResponse("error", "Method not allowed.", [], 405);

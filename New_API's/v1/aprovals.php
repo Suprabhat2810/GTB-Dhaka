@@ -4,14 +4,12 @@ require_once '../config.php';
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'PUT') {
-    // Extract student_id from the query parameter
     $studentId = filter_var($_GET['student_id'] ?? 0, FILTER_VALIDATE_INT, ["options" => ["min_range" => 1]]);
     if (!$studentId) {
         jsonResponse("error", "Invalid or missing student ID.", [], 400);
     }
 
-    $action = $_GET['action'] ?? 'approve'; // Default to approve if action is not specified
-
+    $action = $_GET['action'] ?? 'approve';
     $user = authenticate('admin');
 
     $data = json_decode(file_get_contents("php://input"), true);
@@ -51,7 +49,7 @@ if ($method === 'PUT') {
 
             // Trigger notification
             $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
-            $stmt->execute([$studentId, "Your registration has been approved. Please upload documents and make payment."]);
+            $stmt->execute([$studentId, "Your registration has been approved. Please upload documents and proceed with the semester fee payment."]);
 
             jsonResponse("success", "Student approved successfully.", ["student_id" => $studentId]);
         } elseif ($action === 'reject') {
@@ -62,18 +60,13 @@ if ($method === 'PUT') {
                 jsonResponse("error", "Student already approved, cannot reject.", [], 400);
             }
 
-            // Delete the student and related records
             $pdo->beginTransaction();
-
             $stmt = $pdo->prepare("DELETE FROM approvals WHERE student_id = ?");
             $stmt->execute([$studentId]);
-
             $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?");
             $stmt->execute([$studentId]);
-
             $pdo->commit();
 
-            // Trigger notification (optional)
             $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
             $stmt->execute([$studentId, "Your registration has been rejected."]);
 
@@ -94,10 +87,8 @@ if ($method === 'PUT') {
     $offset = ($page - 1) * $limit;
 
     try {
-        // Log the request parameters for debugging
         $log->info("Fetching pending approvals with page: $page, limit: $limit, offset: $offset");
 
-        // Use positional placeholders (?) instead of named placeholders to avoid binding issues
         $stmt = $pdo->prepare("
             SELECT s.id, s.name, s.email, s.program 
             FROM students s
@@ -110,7 +101,16 @@ if ($method === 'PUT') {
         $stmt->execute();
         $pending = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // Log the fetched data
+        // Map documents (assuming a documents table exists)
+        // foreach ($pending as &$student) {
+        //     $stmt = $pdo->prepare("SELECT document_name FROM documents WHERE student_id = ?");
+        //     $stmt->execute([$student['id']]);
+        //     $student['documents'] = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        // }
+        foreach ($pending as &$student) {
+            $student['documents'] = [];
+        }
+
         $log->info("Pending students fetched: " . json_encode($pending));
 
         $stmt = $pdo->prepare("

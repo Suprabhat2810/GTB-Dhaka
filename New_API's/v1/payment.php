@@ -18,7 +18,6 @@ if ($method === 'GET') {
 
     try {
         if ($role === 'admin') {
-            // Admin: Fetch all payments
             $stmt = $pdo->prepare("
                 SELECT p.id, p.student_id, s.first_name, s.last_name, s.program, p.amount, p.payment_date, p.payment_received
                 FROM payments p
@@ -40,12 +39,8 @@ if ($method === 'GET') {
             }, $payments);
 
             $totalPaid = array_sum(array_column($payments, 'amount'));
-            $data = [
-                'payments' => $formattedPayments,
-                'total_paid' => $totalPaid
-            ];
+            $data = ['payments' => $formattedPayments, 'total_paid' => $totalPaid];
         } else {
-            // Student: Fetch their own payments
             $student_id = $user->id;
             $stmt = $pdo->prepare("
                 SELECT amount, payment_date, payment_received
@@ -57,7 +52,6 @@ if ($method === 'GET') {
 
             $totalPaid = array_sum(array_column($payments, 'amount'));
 
-            // Fetch student's program and semester
             $stmt = $pdo->prepare("SELECT program, semester FROM students WHERE id = ?");
             $stmt->execute([$student_id]);
             $student = $stmt->fetch();
@@ -69,7 +63,6 @@ if ($method === 'GET') {
             $program = $student['program'];
             $semester = $student['semester'];
 
-            // Fetch subjects for the student's program and semester
             $stmt = $pdo->prepare("
                 SELECT credits, valid_from, valid_to
                 FROM subjects
@@ -83,7 +76,6 @@ if ($method === 'GET') {
             $canPay = false;
 
             if (!empty($subjects)) {
-                // Check if the current date is within the payment window
                 $currentDate = date('Y-m-d');
                 $validFrom = $subjects[0]['valid_from'];
                 $validTo = $subjects[0]['valid_to'];
@@ -92,11 +84,18 @@ if ($method === 'GET') {
                     $canPay = true;
                 }
 
-                // Calculate total semester fee (₹5000 per credit)
                 $totalCredits = array_sum(array_column($subjects, 'credits'));
-                $feePerCredit = 5000; // ₹5000 per credit
+                $feePerCredit = 5000;
                 $totalFee = $totalCredits * $feePerCredit;
                 $remainingFee = $totalFee - $totalPaid;
+            }
+
+            // Check if student is approved
+            $stmt = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
+            $stmt->execute([$student_id]);
+            $approval = $stmt->fetch();
+            if (!$approval || $approval['approved'] != 1) {
+                $canPay = false;
             }
 
             $data = [
@@ -117,7 +116,6 @@ if ($method === 'GET') {
     $user = authenticate();
     $role = $user->role;
 
-    // Extract student_id and amount from the request
     $data = json_decode(file_get_contents("php://input"), true);
     $amount = filter_var($data['amount'] ?? 0, FILTER_VALIDATE_FLOAT);
 
@@ -127,20 +125,17 @@ if ($method === 'GET') {
 
     try {
         if ($role === 'admin') {
-            // Admin: Create a payment order for a specific student
             $studentId = filter_var($data['student_id'] ?? 0, FILTER_VALIDATE_INT, ["options" => ["min_range" => 1]]);
             if (!$studentId) {
                 jsonResponse("error", "Invalid or missing student ID.", [], 400);
             }
 
-            // Check if the student exists
             $stmt = $pdo->prepare("SELECT 1 FROM students WHERE id = ?");
             $stmt->execute([$studentId]);
             if (!$stmt->fetch()) {
                 jsonResponse("error", "Student not found.", [], 404);
             }
 
-            // Check if the student is approved
             $stmt = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
             $stmt->execute([$studentId]);
             $approval = $stmt->fetch();
@@ -148,24 +143,20 @@ if ($method === 'GET') {
                 jsonResponse("error", "Student must be approved before recording payment.", [], 403);
             }
 
-            // Check if the student has uploaded a document
             $stmt = $pdo->prepare("SELECT 1 FROM documents WHERE student_id = ?");
             $stmt->execute([$studentId]);
             if (!$stmt->fetch()) {
                 jsonResponse("error", "Student must upload a document before recording payment.", [], 403);
             }
 
-            // Check if payment has already been recorded
             $stmt = $pdo->prepare("SELECT 1 FROM payments WHERE student_id = ? AND payment_received = 1");
             $stmt->execute([$studentId]);
             if ($stmt->fetch()) {
                 jsonResponse("error", "Payment already recorded for this student.", [], 400);
             }
         } else {
-            // Student: Create a payment order for themselves
             $studentId = $user->id;
 
-            // Fetch student's profile to get program and semester
             $stmt = $pdo->prepare("SELECT program, semester FROM students WHERE id = ?");
             $stmt->execute([$studentId]);
             $student = $stmt->fetch();
@@ -176,11 +167,10 @@ if ($method === 'GET') {
             $program = $student['program'];
             $semester = $student['semester'];
 
-            // Fetch subjects for the student's program and semester
             $stmt = $pdo->prepare("
                 SELECT credits, valid_from, valid_to
                 FROM subjects
-                WHERE program = ? AND semester = ?
+                WHERE department = ? AND semester = ?
             ");
             $stmt->execute([$program, $semester]);
             $subjects = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -189,7 +179,6 @@ if ($method === 'GET') {
                 jsonResponse("error", "No subjects found for your program and semester.", [], 404);
             }
 
-            // Check if the current date is within the payment window
             $currentDate = date('Y-m-d');
             $validFrom = $subjects[0]['valid_from'];
             $validTo = $subjects[0]['valid_to'];
@@ -198,12 +187,10 @@ if ($method === 'GET') {
                 jsonResponse("error", "Payment window is closed for this semester.", [], 403);
             }
 
-            // Calculate total semester fee (e.g., ₹5000 per credit)
             $totalCredits = array_sum(array_column($subjects, 'credits'));
-            $feePerCredit = 5000; // ₹5000 per credit
+            $feePerCredit = 5000;
             $totalFee = $totalCredits * $feePerCredit;
 
-            // Check if the requested amount is valid
             $stmt = $pdo->prepare("SELECT SUM(amount) as total_paid FROM payments WHERE student_id = ? AND payment_received = 1");
             $stmt->execute([$studentId]);
             $result = $stmt->fetch();
@@ -213,23 +200,27 @@ if ($method === 'GET') {
             if ($amount > $remainingFee) {
                 jsonResponse("error", "Amount exceeds remaining fee. Remaining fee: ₹$remainingFee", [], 400);
             }
+
+            $stmt = $pdo->prepare("SELECT approved FROM approvals WHERE student_id = ?");
+            $stmt->execute([$studentId]);
+            $approval = $stmt->fetch();
+            if (!$approval || $approval['approved'] != 1) {
+                jsonResponse("error", "Student must be approved before making payment.", [], 403);
+            }
         }
 
-        // Initialize Razorpay API
         $api = new Api(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET);
 
-        // Create a Razorpay order
         $orderData = [
             'receipt' => 'student_' . $studentId,
-            'amount' => $amount * 100, // Amount in paise
+            'amount' => $amount * 100,
             'currency' => 'INR',
-            'payment_capture' => 1 // Auto-capture the payment
+            'payment_capture' => 1
         ];
 
         $razorpayOrder = $api->order->create($orderData);
         $razorpayOrderId = $razorpayOrder['id'];
 
-        // Return the order ID to the front-end
         jsonResponse("success", "Razorpay order created successfully.", [
             "order_id" => $razorpayOrderId,
             "amount" => $amount,
@@ -243,7 +234,6 @@ if ($method === 'GET') {
         jsonResponse("error", "Razorpay order creation failed: " . $e->getMessage(), [], 500);
     }
 } elseif ($method === 'PUT') {
-    // Verify and record payment after Razorpay payment
     $user = authenticate();
     $role = $user->role;
 
@@ -262,7 +252,6 @@ if ($method === 'GET') {
     }
 
     try {
-        // Verify the payment signature
         $api = new Api(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET);
         $attributes = [
             'razorpay_order_id' => $razorpayOrderId,
@@ -271,12 +260,15 @@ if ($method === 'GET') {
         ];
         $api->utility->verifyPaymentSignature($attributes);
 
-        // Record the payment in the database
         $stmt = $pdo->prepare("
             INSERT INTO payments (student_id, amount, payment_received, payment_date)
             VALUES (?, ?, 1, NOW())
         ");
         $stmt->execute([$user->id, $amount]);
+
+        // Optional: Send notification
+        $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+        $stmt->execute([$user->id, "Your payment of ₹$amount has been successfully recorded."]);
 
         jsonResponse("success", "Payment recorded successfully.", [], 200);
     } catch (Exception $e) {
