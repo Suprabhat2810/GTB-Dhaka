@@ -4,15 +4,15 @@ require_once '../config.php';
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'GET') {
-    $user = authenticate('student');
+    $user = authenticate();
 
     try {
-        // Fetch notifications for the logged-in student
+        // Fetch notifications for the logged-in student, ordered by notification_date and id descending
         $stmt = $pdo->prepare("
             SELECT id, message, notification_date
             FROM notifications
             WHERE student_id = ?
-            ORDER BY notification_date DESC
+            ORDER BY notification_date DESC, id DESC
         ");
         $stmt->execute([$user->id]);
         $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);

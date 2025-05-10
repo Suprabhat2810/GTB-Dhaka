@@ -2,6 +2,9 @@
 require_once '../config.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
+$uri = $_SERVER['REQUEST_URI'];
+$uriParts = explode('/', parse_url($uri, PHP_URL_PATH));
+$endpoint = end($uriParts);
 
 if ($method === 'PUT') {
     $studentId = filter_var($_GET['student_id'] ?? 0, FILTER_VALIDATE_INT, ["options" => ["min_range" => 1]]);
@@ -47,9 +50,22 @@ if ($method === 'PUT') {
             ");
             $stmt->execute([$studentId, $adminId, $adminId]);
 
+            // Pre-populate personal_info with existing student data
+            $stmt = $pdo->prepare("SELECT name, gender, date_of_birth FROM students WHERE id = ?");
+            $stmt->execute([$studentId]);
+            $studentData = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            $stmt = $pdo->prepare("
+                INSERT INTO personal_info (student_id, name, gender, date_of_birth)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                name = VALUES(name), gender = VALUES(gender), date_of_birth = VALUES(date_of_birth)
+            ");
+            $stmt->execute([$studentId, $studentData['name'], $studentData['gender'], $studentData['date_of_birth']]);
+
             // Trigger notification
             $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
-            $stmt->execute([$studentId, "Your registration has been approved. Please upload documents and proceed with the semester fee payment."]);
+            $stmt->execute([$studentId, "Your registration has been approved. Please complete your final registration details."]);
 
             jsonResponse("success", "Student approved successfully.", ["student_id" => $studentId]);
         } elseif ($action === 'reject') {
@@ -62,6 +78,8 @@ if ($method === 'PUT') {
 
             $pdo->beginTransaction();
             $stmt = $pdo->prepare("DELETE FROM approvals WHERE student_id = ?");
+            $stmt->execute([$studentId]);
+            $stmt->prepare("DELETE FROM personal_info WHERE student_id = ?");
             $stmt->execute([$studentId]);
             $stmt = $pdo->prepare("DELETE FROM students WHERE id = ?");
             $stmt->execute([$studentId]);
@@ -78,6 +96,71 @@ if ($method === 'PUT') {
         $pdo->rollBack();
         $log->error("Approval/Rejection failed: " . $e->getMessage());
         jsonResponse("error", "Operation failed: " . $e->getMessage(), [], 500);
+    }
+} elseif ($method === 'POST' && $endpoint === 'final-registration') {
+    $data = json_decode(file_get_contents("php://input"), true);
+    $user = authenticate('student');
+
+    $requiredFields = ['fatherName', 'motherName', 'casteCategory', 'phone', 'aadhaarNumber', 'address', 'previousBoardUniversity', 'lastClassResult', 'subjectsPapers'];
+    foreach ($requiredFields as $field) {
+        if (!isset($data[$field]) || empty($data[$field])) {
+            jsonResponse("error", "Missing required field: $field", [], 400);
+        }
+    }
+
+    $studentId = $user->id;
+    $fatherName = filter_var($data['fatherName'], FILTER_SANITIZE_STRING);
+    $motherName = filter_var($data['motherName'], FILTER_SANITIZE_STRING);
+    $casteCategory = filter_var($data['casteCategory'], FILTER_SANITIZE_STRING);
+    $phone = filter_var($data['phone'], FILTER_SANITIZE_STRING);
+    $aadhaarNumber = filter_var($data['aadhaarNumber'], FILTER_SANITIZE_STRING);
+    $address = filter_var($data['address'], FILTER_SANITIZE_STRING);
+    $previousBoardUniversity = filter_var($data['previousBoardUniversity'], FILTER_SANITIZE_STRING);
+    $lastClassResult = filter_var($data['lastClassResult'], FILTER_SANITIZE_STRING);
+    $subjectsPapers = filter_var($data['subjectsPapers'], FILTER_SANITIZE_STRING);
+    $additionalSubjects = filter_var($data['additionalSubjects'] ?? '', FILTER_SANITIZE_STRING);
+
+    if (!preg_match('/^\+91\d{10}$/', $phone)) {
+        jsonResponse("error", "Invalid phone number format. Use +91 followed by 10 digits.", [], 400);
+    }
+    if (!preg_match('/^\d{12}$/', $aadhaarNumber)) {
+        jsonResponse("error", "Invalid Aadhaar number format. Use 12 digits.", [], 400);
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            INSERT INTO personal_info (student_id, father_name, mother_name, caste_category, phone, aadhaar_number, address, previous_board_university, last_class_result, subjects_papers, additional_subjects)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+            father_name = VALUES(father_name),
+            mother_name = VALUES(mother_name),
+            caste_category = VALUES(caste_category),
+            phone = VALUES(phone),
+            aadhaar_number = VALUES(aadhaar_number),
+            address = VALUES(address),
+            previous_board_university = VALUES(previous_board_university),
+            last_class_result = VALUES(last_class_result),
+            subjects_papers = VALUES(subjects_papers),
+            additional_subjects = VALUES(additional_subjects)
+        ");
+        $stmt->execute([
+            $studentId,
+            $fatherName,
+            $motherName,
+            $casteCategory,
+            $phone,
+            $aadhaarNumber,
+            $address,
+            $previousBoardUniversity,
+            $lastClassResult,
+            $subjectsPapers,
+            $additionalSubjects
+        ]);
+
+        jsonResponse("success", "Final registration details submitted successfully.", [], 200);
+    } catch (PDOException $e) {
+        $log->error("Failed to submit final registration details: " . $e->getMessage());
+        jsonResponse("error", "Failed to submit final registration details.", [], 500);
     }
 } elseif ($method === 'GET' && isset($_GET['pending'])) {
     $user = authenticate('admin');
@@ -101,12 +184,6 @@ if ($method === 'PUT') {
         $stmt->execute();
         $pending = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // Map documents (assuming a documents table exists)
-        // foreach ($pending as &$student) {
-        //     $stmt = $pdo->prepare("SELECT document_name FROM documents WHERE student_id = ?");
-        //     $stmt->execute([$student['id']]);
-        //     $student['documents'] = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        // }
         foreach ($pending as &$student) {
             $student['documents'] = [];
         }

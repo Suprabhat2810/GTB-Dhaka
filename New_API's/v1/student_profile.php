@@ -8,7 +8,7 @@ if ($method === 'GET') {
 
     try {
         $stmt = $pdo->prepare("
-            SELECT s.name, s.program, a.approved
+            SELECT s.name, s.program, s.semester ,a.approved
             FROM students s
             LEFT JOIN approvals a ON s.id = a.student_id
             WHERE s.id = ?
@@ -28,6 +28,7 @@ if ($method === 'GET') {
         $data = [
             'first_name' => $firstName,
             'last_name' => $lastName,
+            'semester'=> $profile['semester'],
             'program' => $profile['program'],
             'status' => $profile['approved'] ? 'Approved' : 'Pending',
         ];

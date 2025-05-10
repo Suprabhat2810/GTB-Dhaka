@@ -16,8 +16,8 @@ try {
 define('JWT_SECRET', 'your_jwt_secret_key_here');
 
 // Razorpay API Keys (Test Mode)
-define('RAZORPAY_KEY_ID', 'rzp_test_xxxxxxxxxxxxxx'); // Replace with your Razorpay Key ID
-define('RAZORPAY_KEY_SECRET', 'xxxxxxxxxxxxxxxxxxxx'); // Replace with your Razorpay Key Secret
+define('RAZORPAY_KEY_ID', 'rzp_test_Ugj6jGrq7Gt5SC'); // Replace with your Razorpay Key ID
+define('RAZORPAY_KEY_SECRET', 'UPOPjyRMkysGASaueAdMca29'); // Replace with your Razorpay Key Secret
 
 // Set CORS headers
 header("Access-Control-Allow-Origin: *");
