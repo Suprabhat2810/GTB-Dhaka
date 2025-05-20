@@ -1,8 +1,5 @@
 <?php
 require_once '../config.php';
-require_once '../vendor/autoload.php';
-
-use Razorpay\Api\Api;
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -19,7 +16,7 @@ if ($method === 'GET') {
     try {
         if ($role === 'admin') {
             $stmt = $pdo->prepare("
-                SELECT p.id, p.student_id, s.name AS student_name, s.program, p.amount, p.payment_date, p.payment_received, p.pending_amount
+                SELECT p.id, p.student_id, s.name AS student_name, s.program, p.amount, p.payment_date, p.payment_received, p.payment_status, p.pending_amount, p.total_fee
                 FROM payments p
                 JOIN students s ON p.student_id = s.id
             ");
@@ -35,7 +32,9 @@ if ($method === 'GET') {
                     'amount' => $payment['amount'],
                     'payment_date' => $payment['payment_date'],
                     'payment_received' => $payment['payment_received'],
-                    'pending_amount' => $payment['pending_amount']
+                    'payment_status' => $payment['payment_status'], // Include payment_status
+                    'pending_amount' => $payment['pending_amount'],
+                    'total_fee' => $payment['total_fee']
                 ];
             }, $payments);
 
@@ -44,7 +43,7 @@ if ($method === 'GET') {
         } else {
             $student_id = $user->id;
             $stmt = $pdo->prepare("
-                SELECT amount, payment_date, payment_received, total_fee
+                SELECT amount, payment_date, payment_received, payment_status, total_fee
                 FROM payments
                 WHERE student_id = ?
                 ORDER BY payment_date DESC
@@ -54,7 +53,7 @@ if ($method === 'GET') {
             $latestPayment = $stmt->fetch(PDO::FETCH_ASSOC);
 
             $stmt = $pdo->prepare("
-                SELECT amount, payment_date, payment_received
+                SELECT amount, payment_date, payment_received, payment_status
                 FROM payments
                 WHERE student_id = ?
             ");
@@ -162,7 +161,7 @@ if ($method === 'GET') {
                 jsonResponse("error", "Student must upload a document before recording payment.", [], 403);
             }
 
-            $stmt = $pdo->prepare("SELECT 1 FROM payments WHERE student_id = ? AND payment_received = 1");
+            $stmt = $pdo->prepare("SELECT 1 FROM payments WHERE student_id = ? AND payment_status = 'paid'");
             $stmt->execute([$studentId]);
             if ($stmt->fetch()) {
                 jsonResponse("error", "Payment already recorded for this student.", [], 400);
@@ -178,7 +177,6 @@ if ($method === 'GET') {
             }
 
             $program = $student['program'];
-            $semester = $student['semester'];
 
             $stmt = $pdo->prepare("
                 SELECT total_fee
@@ -191,7 +189,7 @@ if ($method === 'GET') {
             $latestPayment = $stmt->fetch(PDO::FETCH_ASSOC);
             $totalFee = $latestPayment ? $latestPayment['total_fee'] : 110000; // Default to 110000
 
-            $stmt = $pdo->prepare("SELECT SUM(amount) as total_paid FROM payments WHERE student_id = ? AND payment_received = 1");
+            $stmt = $pdo->prepare("SELECT SUM(amount) as total_paid FROM payments WHERE student_id = ? AND payment_status = 'paid'");
             $stmt->execute([$studentId]);
             $result = $stmt->fetch();
             $totalPaid = $result['total_paid'] ?? 0;
@@ -222,75 +220,101 @@ if ($method === 'GET') {
             if (!$approval || $approval['approved'] != 1) {
                 jsonResponse("error", "Student must be approved before making payment.", [], 403);
             }
+
+            // Insert payment as pending
+            $stmt = $pdo->prepare("
+                INSERT INTO payments (student_id, amount, payment_received, payment_status, payment_date, total_fee, pending_amount)
+                VALUES (?, ?, 0, 'pending', NOW(), ?, ?)
+            ");
+            $stmt->execute([$studentId, $amount, $totalFee, $remainingFee - $amount]);
         }
 
-        $api = new Api(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET);
-
-        $orderData = [
-            'receipt' => 'student_' . $studentId,
-            'amount' => $amount * 100,
-            'currency' => 'INR',
-            'payment_capture' => 1
-        ];
-
-        $log->info("Creating Razorpay order with data: " . json_encode($orderData));
-        $razorpayOrder = $api->order->create($orderData);
-        $log->info("Razorpay order created: " . json_encode($razorpayOrder));
-        $razorpayOrderId = $razorpayOrder['id'];
-
-        jsonResponse("success", "Razorpay order created successfully.", [
-            "order_id" => $razorpayOrderId,
-            "amount" => $amount,
-            "currency" => "INR",
-            "key_id" => RAZORPAY_KEY_ID,
-            "total_fee" => $totalFee,
-            "remaining_fee" => $remainingFee
-        ], 200);
+        jsonResponse("success", "Payment submitted successfully. Awaiting verification.", [], 200);
     } catch (Exception $e) {
-        $log->error("Razorpay order creation failed: " . $e->getMessage());
-        jsonResponse("error", "Razorpay order creation failed: " . $e->getMessage(), [], 500);
+        $log->error("Payment submission failed: " . $e->getMessage());
+        jsonResponse("error", "Payment submission failed: " . $e->getMessage(), [], 500);
     }
 } elseif ($method === 'PUT') {
     $user = authenticate();
     $role = $user->role;
 
-    if ($role !== 'student') {
-        jsonResponse("error", "Only students can verify payments.", [], 403);
-    }
-
     $data = json_decode(file_get_contents("php://input"), true);
-    $razorpayPaymentId = $data['razorpay_payment_id'] ?? null;
-    $razorpayOrderId = $data['razorpay_order_id'] ?? null;
-    $razorpaySignature = $data['razorpay_signature'] ?? null;
-    $amount = filter_var($data['amount'] ?? 0, FILTER_VALIDATE_FLOAT);
+    $action = $data['action'] ?? '';
+    $paymentId = filter_var($data['payment_id'] ?? 0, FILTER_VALIDATE_INT, ["options" => ["min_range" => 1]]);
 
-    if (!$razorpayPaymentId || !$razorpayOrderId || !$razorpaySignature || !$amount) {
-        jsonResponse("error", "Missing payment details.", [], 400);
+    if (!$paymentId) {
+        jsonResponse("error", "Invalid or missing payment ID.", [], 400);
     }
 
-    try {
-        $api = new Api(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET);
-        $attributes = [
-            'razorpay_order_id' => $razorpayOrderId,
-            'razorpay_payment_id' => $razorpayPaymentId,
-            'razorpay_signature' => $razorpaySignature
-        ];
-        $api->utility->verifyPaymentSignature($attributes);
-
+    if ($role === 'student') {
+        // Update payment status to 'processing'
         $stmt = $pdo->prepare("
-            INSERT INTO payments (student_id, amount, payment_received, payment_date, total_fee)
-            VALUES (?, ?, 1, NOW(), (SELECT total_fee FROM payments WHERE student_id = ? ORDER BY payment_date DESC LIMIT 1))
+            UPDATE payments 
+            SET payment_status = 'processing' 
+            WHERE id = ? AND student_id = ? AND payment_status = 'pending'
         ");
-        $stmt->execute([$user->id, $amount, $user->id]);
+        $stmt->execute([$paymentId, $user->id]);
 
-        // Optional: Send notification
+        if ($stmt->rowCount() === 0) {
+            jsonResponse("error", "Payment not found or already processed.", [], 404);
+        }
+
+        // Notify admin
         $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
-        $stmt->execute([$user->id, "Your payment of ₹$amount has been successfully recorded."]);
+        $stmt->execute([$user->id, "Payment of ₹{$data['amount']} submitted by student ID {$user->id}. Awaiting verification."]);
 
-        jsonResponse("success", "Payment recorded successfully.", [], 200);
-    } catch (Exception $e) {
-        $log->error("Payment verification failed: " . $e->getMessage());
-        jsonResponse("error", "Payment verification failed: " . $e->getMessage(), [], 400);
+        jsonResponse("success", "Payment marked as processing. Awaiting admin verification.", [], 200);
+    } elseif ($role === 'admin') {
+        if ($action === 'confirm') {
+            // Update payment status to 'paid'
+            $stmt = $pdo->prepare("
+                UPDATE payments 
+                SET payment_status = 'paid', payment_received = 1, pending_amount = 0
+                WHERE id = ? AND payment_status = 'pending'
+            ");
+            $stmt->execute([$paymentId]);
+
+            if ($stmt->rowCount() === 0) {
+                jsonResponse("error", "Payment not found or not in pending status.", [], 404);
+            }
+
+            // Fetch payment details for notification
+            $stmt = $pdo->prepare("SELECT student_id, amount FROM payments WHERE id = ?");
+            $stmt->execute([$paymentId]);
+            $payment = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            // Notify student
+            $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+            $stmt->execute([$payment['student_id'], "Your payment of ₹{$payment['amount']} has been confirmed by the admin."]);
+
+            jsonResponse("success", "Payment confirmed successfully.", [], 200);
+        } else {
+            // Existing logic for approving 'processing' payments
+            $stmt = $pdo->prepare("
+                UPDATE payments 
+                SET payment_status = 'paid', payment_received = 1 
+                WHERE id = ? AND payment_status = 'processing'
+            ");
+            $stmt->execute([$paymentId]);
+
+            if ($stmt->rowCount() === 0) {
+                jsonResponse("error", "Payment not found or not in processing state.", [], 404);
+            }
+
+            // Notify student
+            $stmt = $pdo->prepare("SELECT student_id, amount FROM payments WHERE id = ?");
+            $stmt->execute([$paymentId]);
+            $payment = $stmt->fetch(PDO::FETCH_ASSOC);
+            $studentId = $payment['student_id'];
+            $amount = $payment['amount'];
+
+            $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+            $stmt->execute([$studentId, "Your payment of ₹{$amount} has been approved by the admin."]);
+
+            jsonResponse("success", "Payment approved successfully.", [], 200);
+        }
+    } else {
+        jsonResponse("error", "Unauthorized role.", [], 403);
     }
 } else {
     jsonResponse("error", "Method not allowed.", [], 405);

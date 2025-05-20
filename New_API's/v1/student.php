@@ -60,7 +60,7 @@ if ($method === 'POST') {
         $stmt->execute([$studentId]);
 
         // Craft WhatsApp message
-        $institutionName = "Global Tech Institute"; // Replace with your institution name
+        $institutionName = "GTB National College Dhaka"; // Replace with your institution name
         $message = "Welcome to {$institutionName},\nDear {$name},\nThank you for registering with us! Your Temporary Serial Number is {$temporarySerialNumber} and your password is {$password}. Please log in to continue your journey with us!";
 
         // Attempt to send WhatsApp message (commented out without Twilio)
