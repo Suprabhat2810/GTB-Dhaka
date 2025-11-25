@@ -1,18 +1,14 @@
-version: "3.9"
-
 services:
   backend:
     build: ./new_api_deploy
     container_name: php-backend
-    volumes:
-      - ./new_api_deploy:/var/www/html
     ports:
       - "8080:80"
     depends_on:
       - db
 
   frontend:
-    build: ./project 4/project 4
+    build: "./project 4/frontend"
     container_name: react-frontend
     ports:
       - "3000:80"
@@ -26,17 +22,8 @@ services:
       MYSQL_DATABASE: school
     volumes:
       - db_data:/var/lib/mysql
-
-  phpmyadmin:
-    image: phpmyadmin/phpmyadmin
-    container_name: phpmyadmin
-    restart: always
     ports:
-      - "8081:80"
-    environment:
-      PMA_HOST: host.docker.internal
-      PMA_PORT: 3307
-
+      - "3308:3306"
 
 volumes:
   db_data:
