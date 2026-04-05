@@ -65,7 +65,8 @@ try {
                 s.instructor,
                 s.schedule,
                 s.credits,
-                s.progress
+                s.progress,
+                s.type
             FROM subjects s
             WHERE s.department = ?
               AND s.semester = ?

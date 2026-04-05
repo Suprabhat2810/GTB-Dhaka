@@ -113,7 +113,9 @@ try {
         // Restructure the response to match PersonalProfile interface
         $response = [
             'student_id' => (int)$student['student_id'],
-            'vid_number' => $student['final_registration_number'] ?? '',
+            'vid_number' => (string)($student['student_id'] ?? ''),
+            'final_registration_number' => $student['final_registration_number'] ?? '',
+            'temporary_serial_number' => '',
             'date_of_birth' => $student['date_of_birth'] ?? '',
             'first_name' => $firstName,
             'last_name' => $lastName,
@@ -159,6 +161,8 @@ try {
     }
 
     elseif ($method === 'POST') {
+        $logger->info('POST request received to final_registration');
+        
         $user = authenticate();
 
         if (!$user) {
@@ -166,6 +170,8 @@ try {
             jsonResponse("error", "Unauthorized access.", [], 403);
             exit;
         }
+
+        $logger->info('User authenticated', ['user_id' => $user->id ?? $user->sub ?? 'UNKNOWN', 'role' => $user->role ?? 'UNKNOWN']);
 
         $data = json_decode(file_get_contents('php://input'), true);
 
@@ -175,12 +181,17 @@ try {
             exit;
         }
 
-        // Validate user access
-        if (($user->role ?? '') === 'student' && (int)$user->id !== (int)$data['student_id']) {
-            $logger->warning('Student attempted to modify another student\'s final registration', ['actor' => $user->id ?? null, 'target_student' => $data['student_id']]);
+        $logger->info('Data received', ['student_id' => $data['student_id'], 'data_keys' => array_keys($data)]);
+
+        // Validate user access - use sub if id is not set
+        $userId = (int)($user->sub ?? $user->id ?? 0);
+        if (($user->role ?? '') === 'student' && $userId !== (int)$data['student_id']) {
+            $logger->warning('Student attempted to modify another student\'s final registration', ['actor' => $userId, 'target_student' => $data['student_id']]);
             jsonResponse("error", "Unauthorized access.", [], 403);
             exit;
         }
+
+        $logger->info('Authorization check passed', ['user_id' => $userId, 'student_id' => $data['student_id']]);
 
         $pdo = getPDO();
 
@@ -220,14 +231,29 @@ try {
             }
         }
 
+        // Log the received data for debugging
+        $logger->info('Received final registration data', [
+            'student_id' => $data['student_id'],
+            'father_name' => $data['father_name'] ?? 'NOT_SET',
+            'address' => $data['address'] ?? 'NOT_SET',
+            'caste_category' => $data['caste_category'] ?? 'NOT_SET',
+            'data_keys' => array_keys($data)
+        ]);
+
         try {
             // Check if a personal_info record already exists for this student
             $stmt = $pdo->prepare("SELECT id FROM personal_info WHERE student_id = ? LIMIT 1");
             $stmt->execute([(int)$data['student_id']]);
             $existingRecord = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            if ($existingRecord && isset($data['id']) && $data['id'] == $existingRecord['id']) {
-                // Update the existing record using the provided id
+            $logger->info('Existing record check', [
+                'student_id' => $data['student_id'],
+                'existing_record' => $existingRecord ? 'FOUND (id='.$existingRecord['id'].')' : 'NOT_FOUND'
+            ]);
+
+            if ($existingRecord) {
+                // Update the existing record
+                $logger->info('Executing UPDATE query', ['student_id' => $data['student_id'], 'record_id' => $existingRecord['id']]);
                 $query = "
                     UPDATE personal_info SET
                         father_name = :father_name,
@@ -257,7 +283,7 @@ try {
 
                 $stmt = $pdo->prepare($query);
                 $stmt->execute([
-                    'id' => $data['id'],
+                    'id' => $existingRecord['id'],
                     'father_name' => $data['father_name'] ?? '',
                     'mother_name' => $data['mother_name'] ?? '',
                     'father_occupation' => $data['father_occupation'] ?? '',
@@ -281,8 +307,10 @@ try {
                     'percentage' => $data['percentage'] ?? '',
                     'study_gap' => $data['study_gap'] ?? '',
                 ]);
+                $logger->info('UPDATE query executed successfully', ['student_id' => $data['student_id'], 'rows_affected' => $stmt->rowCount()]);
             } else {
                 // Insert a new record if no existing record is found
+                $logger->info('Executing INSERT query', ['student_id' => $data['student_id']]);
                 $query = "
                     INSERT INTO personal_info (
                         student_id, father_name, mother_name, father_occupation, mother_occupation,
@@ -325,6 +353,46 @@ try {
                     'percentage' => $data['percentage'] ?? '',
                     'study_gap' => $data['study_gap'] ?? '',
                 ]);
+                $logger->info('INSERT query executed successfully', ['student_id' => $data['student_id'], 'last_insert_id' => $pdo->lastInsertId()]);
+            }
+
+            // Auto-assign final registration number when form is submitted and locked
+            if (!empty($data['lock_form_student'])) {
+                try {
+                    // Check if final registration number already exists
+                    $stmt = $pdo->prepare("SELECT final_registration_number FROM students WHERE id = ? LIMIT 1");
+                    $stmt->execute([$data['student_id']]);
+                    $studentRow = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if (empty($studentRow['final_registration_number'])) {
+                        // Generate final registration number
+                        $serial = str_pad((string)$data['student_id'], 2, "0", STR_PAD_LEFT);
+                        $month = date('m');
+                        $year = date('y');
+                        $finalRegistrationNumber = "GTB{$serial}{$month}{$year}";
+                        
+                        // Update student with final registration number
+                        $stmt = $pdo->prepare("UPDATE students SET final_registration_number = ? WHERE id = ?");
+                        $stmt->execute([$finalRegistrationNumber, $data['student_id']]);
+                        
+                        $logger->info('Final registration number auto-assigned on form submission', [
+                            'student_id' => $data['student_id'],
+                            'final_registration_number' => $finalRegistrationNumber,
+                            'actor' => $user->id ?? null
+                        ]);
+                    } else {
+                        $logger->info('Final registration number already exists', [
+                            'student_id' => $data['student_id'],
+                            'final_registration_number' => $studentRow['final_registration_number']
+                        ]);
+                    }
+                } catch (PDOException $e) {
+                    $logger->error('Failed to auto-assign final registration number', [
+                        'error' => $e->getMessage(),
+                        'student_id' => $data['student_id']
+                    ]);
+                    // Don't fail the whole request if this fails
+                }
             }
 
             $logger->info('Final registration details updated', ['student_id' => $data['student_id'], 'actor' => $user->id ?? null]);

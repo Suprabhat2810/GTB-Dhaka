@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../services/StorageService.php';
+
+use Services\StorageService;
 
 $logger = getLogger('documents');
 $pdo = getPDO();
@@ -102,7 +105,6 @@ try {
         $allowedFileTypes = ['application/pdf', 'image/jpeg', 'image/png'];
         $allowedExtensions = ['pdf', 'jpeg', 'jpg', 'png'];
         $maxFileSize = 5 * 1024 * 1024; // 5 MB
-        $uploadDir = __DIR__ . '/../uploads/documents/';
 
         $file = $_FILES['document'];
         $fileName = basename($file['name'] ?? '');
@@ -129,28 +131,26 @@ try {
             jsonResponse("error", "Invalid file type. Allowed types are PDF, JPEG, PNG.", [], 400);
         }
 
-        // Ensure upload directory exists and writable
-        if (!is_dir($uploadDir) && !mkdir($uploadDir, 0755, true)) {
-            $logger->error('Failed to create upload directory', ['dir' => $uploadDir]);
-            jsonResponse("error", "Failed to create upload directory.", [], 500);
-        }
-        if (!is_writable($uploadDir)) {
-            $logger->error('Upload directory not writable', ['dir' => $uploadDir]);
-            jsonResponse("error", "Upload directory is not writable.", [], 500);
-        }
-
-        // Move file
+        // Generate unique filename and relative path
         $newFileName = uniqid('doc_', true) . '.' . $fileExt;
-        $targetFilePath = $uploadDir . $newFileName;
-        if (move_uploaded_file($fileTmpName, $targetFilePath)) {
-            // store relative path for DB (keep consistent with your app)
-            $relativePath = 'uploads/documents/' . $newFileName;
+        $relativePath = 'uploads/documents/' . $newFileName;
+
+        // Use StorageService for upload (handles both local and S3)
+        $storage = StorageService::getInstance();
+        if ($storage->upload($fileTmpName, $relativePath)) {
             try {
                 $stmt = $pdo->prepare("INSERT INTO documents (student_id, document_path, upload_date, file_size, file_type, status) VALUES (?, ?, NOW(), ?, ?, 'pending')");
                 $stmt->execute([$studentId, $relativePath, $fileSize, $fileType]);
                 $documentId = $pdo->lastInsertId();
 
-                $logger->info('Document uploaded', ['document_id' => $documentId, 'student_id' => $studentId, 'actor' => $user->id ?? null, 'path' => $relativePath, 'size' => $fileSize]);
+                $logger->info('Document uploaded', [
+                    'document_id' => $documentId,
+                    'student_id' => $studentId,
+                    'actor' => $user->id ?? null,
+                    'path' => $relativePath,
+                    'size' => $fileSize,
+                    'storage' => StorageService::getDriverName()
+                ]);
 
                 jsonResponse("success", "Document uploaded successfully.", [
                     "document_id" => $documentId,
@@ -158,15 +158,13 @@ try {
                 ], 201);
             } catch (PDOException $e) {
                 // cleanup file on DB failure
-                if (file_exists($targetFilePath)) {
-                    @unlink($targetFilePath);
-                }
+                $storage->delete($relativePath);
                 $logger->error('Document upload DB insert failed', ['error' => $e->getMessage(), 'actor' => $user->id ?? null]);
                 jsonResponse("error", "Document upload failed.", [], 500);
             }
         } else {
-            $logger->error('Failed to move uploaded file', ['tmp' => $fileTmpName, 'target' => $targetFilePath, 'actor' => $user->id ?? null]);
-            jsonResponse("error", "Failed to move uploaded file.", [], 500);
+            $logger->error('Failed to upload file to storage', ['tmp' => $fileTmpName, 'path' => $relativePath, 'storage' => StorageService::getDriverName(), 'actor' => $user->id ?? null]);
+            jsonResponse("error", "Failed to upload file.", [], 500);
         }
     }
 
@@ -197,6 +195,51 @@ try {
         } catch (PDOException $e) {
             $logger->error('Failed to update document status', ['error' => $e->getMessage(), 'document_id' => $documentId, 'actor' => $user->id ?? null]);
             jsonResponse("error", "Failed to update document status: " . $e->getMessage(), [], 500);
+        }
+    }
+
+    elseif ($method === 'DELETE') {
+        // Delete document (admin only)
+        $user = authenticate('admin');
+
+        $data = json_decode(file_get_contents("php://input"), true);
+        $documentId = isset($data['id']) ? filter_var($data['id'], FILTER_VALIDATE_INT, ["options" => ["min_range" => 1]]) : null;
+
+        if (!$documentId) {
+            $logger->warning('Invalid document delete request - missing ID', ['payload' => $data, 'actor' => $user->id ?? null]);
+            jsonResponse("error", "Invalid document ID.", [], 400);
+        }
+
+        try {
+            // Get document path before deleting
+            $stmt = $pdo->prepare("SELECT document_path FROM documents WHERE id = ? LIMIT 1");
+            $stmt->execute([$documentId]);
+            $document = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$document) {
+                $logger->info('Document delete - not found', ['document_id' => $documentId, 'actor' => $user->id ?? null]);
+                jsonResponse("error", "Document not found.", [], 404);
+            }
+
+            $documentPath = $document['document_path'];
+
+            // Delete from database
+            $stmt = $pdo->prepare("DELETE FROM documents WHERE id = ?");
+            $stmt->execute([$documentId]);
+
+            // Delete file from storage (local or S3)
+            $storage = StorageService::getInstance();
+            if ($storage->delete($documentPath)) {
+                $logger->info('Document file deleted', ['path' => $documentPath, 'document_id' => $documentId, 'storage' => StorageService::getDriverName(), 'actor' => $user->id ?? null]);
+            } else {
+                $logger->warning('Document DB record deleted but file deletion failed', ['path' => $documentPath, 'document_id' => $documentId, 'storage' => StorageService::getDriverName(), 'actor' => $user->id ?? null]);
+            }
+
+            $logger->info('Document deleted successfully', ['document_id' => $documentId, 'actor' => $user->id ?? null]);
+            jsonResponse("success", "Document deleted successfully.", [], 200);
+        } catch (PDOException $e) {
+            $logger->error('Failed to delete document', ['error' => $e->getMessage(), 'document_id' => $documentId, 'actor' => $user->id ?? null]);
+            jsonResponse("error", "Failed to delete document: " . $e->getMessage(), [], 500);
         }
     }
 

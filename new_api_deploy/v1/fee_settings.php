@@ -41,7 +41,17 @@ try {
     $durationMs = round((microtime(true) - $start) * 1000, 2);
 
     if ($feeSettings) {
-        $logger->info('fee_settings: found settings', ['program' => $program, 'duration_ms' => $durationMs]);
+        // Convert is_live to proper boolean
+        $feeSettings['is_live'] = (bool)((int)($feeSettings['is_live'] ?? 0));
+        // Convert numeric fields to proper types
+        $feeSettings['total_fee'] = $feeSettings['total_fee'] ? (float)$feeSettings['total_fee'] : null;
+        $feeSettings['fee_per_credit'] = $feeSettings['fee_per_credit'] ? (float)$feeSettings['fee_per_credit'] : null;
+        
+        $logger->info('fee_settings: found settings', [
+            'program' => $program, 
+            'is_live' => $feeSettings['is_live'],
+            'duration_ms' => $durationMs
+        ]);
         jsonResponse('success', 'Fee settings retrieved successfully.', ['feeSettings' => $feeSettings], 200);
     } else {
         $logger->info('fee_settings: no settings found', ['program' => $program, 'duration_ms' => $durationMs]);

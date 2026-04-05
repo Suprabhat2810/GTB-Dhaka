@@ -1,0 +1,13 @@
+# Allow DELETE method for subject management
+<Limit DELETE>
+    Allow from all
+</Limit>
+
+# Enable rewrite engine
+RewriteEngine On
+
+# Allow all HTTP methods
+<IfModule mod_headers.c>
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-Request-ID, x-client-time"
+</IfModule>

@@ -23,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $input = json_decode(file_get_contents('php://input'), true);
 $program = isset($input['program']) ? trim((string)$input['program']) : null;
 $totalFeeRaw = $input['totalFee'] ?? null;
+$applyToExisting = isset($input['applyToExisting']) ? (bool)$input['applyToExisting'] : false;
 
 $user = authenticate('admin'); // keep same auth behaviour as before
 $updatedBy = (int)($user->sub ?? $user->id ?? 0);
@@ -51,27 +52,42 @@ $pdo = getPDO();
 $inTransaction = false;
 
 try {
-    $logger->info('make_payments_live: starting operation', ['program' => $program, 'totalFee' => $totalFee, 'actor' => $updatedBy]);
+    $logger->info('make_payments_live: starting operation', [
+        'program' => $program, 
+        'totalFee' => $totalFee, 
+        'applyToExisting' => $applyToExisting,
+        'actor' => $updatedBy
+    ]);
 
     $pdo->beginTransaction();
     $inTransaction = true;
 
-    // Set all existing records for this program to is_live = 0 in fee_settings
-    $stmt = $pdo->prepare("UPDATE fee_settings SET is_live = 0 WHERE program = ?");
-    $stmt->execute([$program]);
-
-    // Insert new record with is_live = 1 in fee_settings
-    $stmt = $pdo->prepare("INSERT INTO fee_settings (program, total_fee, updated_by, updated_at, is_live) VALUES (?, ?, ?, NOW(), 1)");
-    $stmt->execute([$program, $totalFee, $updatedBy]);
-
-    // Update total_fee in payments for students enrolled in the specified program
+    // Use the ApplyNewFeeStructure stored procedure for fee versioning
+    $stmt = $pdo->prepare("CALL ApplyNewFeeStructure(?, ?, ?, ?, ?, ?)");
+    $effectiveFrom = date('Y-m-d');
+    $reason = $applyToExisting 
+        ? 'Fee updated via admin panel - Applied to all students'
+        : 'Fee updated via admin panel - New students only';
+    
+    $stmt->execute([
+        $program,
+        $totalFee,
+        $effectiveFrom,
+        $updatedBy,
+        $reason,
+        $applyToExisting ? 1 : 0
+    ]);
+    
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    $stmt->closeCursor();
+    
+    // Mark the new version as live
     $stmt = $pdo->prepare("
-        UPDATE payments p
-        JOIN students s ON p.student_id = s.id
-        SET p.total_fee = ?
-        WHERE s.program = ?
+        UPDATE fee_settings 
+        SET is_live = 1 
+        WHERE id = ? AND is_active = 1
     ");
-    $stmt->execute([$totalFee, $program]);
+    $stmt->execute([$result['new_fee_setting_id']]);
 
     $pdo->commit();
     $inTransaction = false;
@@ -80,11 +96,17 @@ try {
     $logger->info('make_payments_live: operation completed', [
         'program' => $program,
         'totalFee' => $totalFee,
+        'applyToExisting' => $applyToExisting,
+        'affectedStudents' => $result['affected_students'],
         'actor' => $updatedBy,
         'duration_ms' => $durationMs
     ]);
 
-    jsonResponse('success', 'Payment structure applied to the latest entry successfully.', [], 200);
+    $message = $applyToExisting 
+        ? "Fee updated to ₹{$totalFee} for all {$result['affected_students']} students in {$program}"
+        : "Fee updated to ₹{$totalFee}. Will apply to new students in {$program}";
+
+    jsonResponse('success', $message, [], 200);
 } catch (PDOException $e) {
     if ($inTransaction && $pdo->inTransaction()) {
         $pdo->rollBack();

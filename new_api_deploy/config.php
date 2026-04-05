@@ -48,7 +48,7 @@ if (getenv('JWT_PUBLIC_KEY_PATH')) {
 }
 
 // CORS configuration (safer default: restrict origins via env)
-$CORS_ALLOW_ORIGINS = $_ENV['CORS_ALLOW_ORIGINS'] ?: 'http://localhost:5173';
+$CORS_ALLOW_ORIGINS = $_ENV['CORS_ALLOW_ORIGINS'] ?: 'http://localhost:3000';
 $CORS_ALLOW_HEADERS = 'Content-Type, Authorization, X-Requested-With, X-Request-ID, x-client-time';
 $CORS_ALLOW_METHODS = 'GET, POST, PUT, DELETE, OPTIONS';
 

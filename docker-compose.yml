@@ -1,29 +1,74 @@
 services:
-  backend:
-    build: ./new_api_deploy
-    container_name: php-backend
-    ports:
-      - "8080:80"
-    depends_on:
-      - db
-
-  frontend:
-    build: "./project 4/frontend"
-    container_name: react-frontend
-    ports:
-      - "3000:80"
-
+  # MySQL Database
   db:
-    image: mysql:5.7
-    container_name: mysql-db
+    image: mysql:8.0
+    container_name: gtb-mysql
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: school
-    volumes:
-      - db_data:/var/lib/mysql
+      MYSQL_ROOT_PASSWORD: sup2005
+      MYSQL_DATABASE: gtb_database
     ports:
       - "3308:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./backups:/backups
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_general_ci
+      --max_allowed_packet=256M
+    networks:
+      - gtb-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-psup2005"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PHP Backend
+  backend:
+    build:
+      context: ./new_api_deploy
+      dockerfile: Dockerfile
+    container_name: gtb-backend
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: gtb_database
+      DB_USER: root
+      DB_PASSWORD: sup2005
+    ports:
+      - "8080:80"
+    volumes:
+      - ./new_api_deploy:/var/www/html
+      - ./uploads:/var/www/html/uploads
+      - ./excel_data:/var/www/html/excel_data
+      - ./logs:/var/www/html/logs
+    networks:
+      - gtb-network
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gtb-frontend
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    networks:
+      - gtb-network
 
 volumes:
   db_data:
+    driver: local
+
+networks:
+  gtb-network:
+    driver: bridge

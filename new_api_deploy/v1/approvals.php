@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/WhatsAppService.php';
 
 $logger = getLogger('approvals');
 $method = $_SERVER['REQUEST_METHOD'];
@@ -70,6 +71,23 @@ try {
                 jsonResponse("error", "Student already approved.", [], 400);
             }
 
+            // Get student's year (admission year)
+            $stmt = $pdo->prepare("SELECT year FROM students WHERE id = ? LIMIT 1");
+            $stmt->execute([$studentId]);
+            $studentInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+            $admissionYear = (int)($studentInfo['year'] ?? date('Y'));
+            
+            // Calculate academic year
+            $currentMonth = (int)date('n');
+            $currentYear = (int)date('Y');
+            
+            // Academic year starts in January (month 1) for now
+            if ($currentMonth >= 1) {
+                $academicYear = $currentYear . '-' . ($currentYear + 1);
+            } else {
+                $academicYear = ($currentYear - 1) . '-' . $currentYear;
+            }
+
             // Upsert approval
             $stmt = $pdo->prepare("
                 INSERT INTO approvals (student_id, admin_id, approved, approval_date)
@@ -80,6 +98,15 @@ try {
                   approval_date = VALUES(approval_date)
             ");
             $stmt->execute([$studentId, $adminId]);
+            
+            // Update student with semester and academic year
+            $stmt = $pdo->prepare("
+                UPDATE students 
+                SET semester = 1, 
+                    academic_year = ?
+                WHERE id = ?
+            ");
+            $stmt->execute([$academicYear, $studentId]);
 
             // copy student basic data into personal_info
             $stmt = $pdo->prepare("SELECT name, gender, date_of_birth FROM students WHERE id = ? LIMIT 1");
@@ -101,6 +128,33 @@ try {
             // Notification (simple DB insert; future: push to queue)
             $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
             $stmt->execute([$studentId, "Your registration has been approved. Please complete your final registration details."]);
+
+            // Send WhatsApp approval notification (non-breaking)
+            try {
+                $stmt = $pdo->prepare("SELECT name, phone, program FROM students WHERE id = ? LIMIT 1");
+                $stmt->execute([$studentId]);
+                $student = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($student && !empty($student['phone'])) {
+                    $whatsappService = new WhatsAppService($logger);
+                    if ($whatsappService->isEnabled()) {
+                        $whatsappService->sendApprovalMessage(
+                            $student['phone'],
+                            $student['name'],
+                            1, // semester
+                            $academicYear,
+                            $student['program']
+                        );
+                        $logger->info('Approval WhatsApp sent', ['student_id' => $studentId]);
+                    }
+                }
+            } catch (Exception $e) {
+                // Silent failure - approval continues normally
+                $logger->error('WhatsApp approval notification error (non-critical)', [
+                    'error' => $e->getMessage(),
+                    'student_id' => $studentId
+                ]);
+            }
 
             $logger->info('Student approved', [
                 'student_id' => $studentId,
@@ -127,6 +181,11 @@ try {
                 $pdo->beginTransaction();
                 $inTransaction = true;
 
+                // Send notification BEFORE deleting student (optional - can be skipped since student is being deleted)
+                // Commenting out since student won't be able to see it anyway after deletion
+                // $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
+                // $stmt->execute([$studentId, "Your registration has been rejected."]);
+
                 $stmt = $pdo->prepare("DELETE FROM approvals WHERE student_id = ?");
                 $stmt->execute([$studentId]);
 
@@ -145,10 +204,6 @@ try {
                 $logger->error('Reject transaction failed', ['error' => $ex->getMessage(), 'student_id' => $studentId]);
                 jsonResponse("error", "Operation failed.", [], 500);
             }
-
-            // Notification
-            $stmt = $pdo->prepare("INSERT INTO notifications (student_id, message, notification_date) VALUES (?, ?, NOW())");
-            $stmt->execute([$studentId, "Your registration has been rejected."]);
 
             $logger->info('Student rejected', [
                 'student_id' => $studentId,
@@ -251,7 +306,8 @@ try {
             $logger->info("Fetching pending approvals", ['page' => $page, 'limit' => $limit, 'offset' => $offset, 'actor' => $user->id ?? null]);
 
             $stmt = $pdo->prepare("
-                SELECT s.id, s.name, s.email, s.program 
+                SELECT s.id, s.name, s.email, s.phone, s.alternatePhone, s.date_of_birth, 
+                       s.state, s.gender, s.qualification, s.program, s.temporary_serial_number
                 FROM students s
                 LEFT JOIN approvals a ON s.id = a.student_id
                 WHERE a.approved = 0 OR a.approved IS NULL
@@ -262,9 +318,11 @@ try {
             $stmt->execute();
             $pending = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            // attach empty documents array (non-blocking)
+            // attach empty documents array and default submitted date
             foreach ($pending as &$student) {
                 $student['documents'] = [];
+                // Use current date as submitted date (since we don't have a registration_date column)
+                $student['submittedDate'] = date('Y-m-d H:i:s');
             }
 
             $stmt = $pdo->prepare("

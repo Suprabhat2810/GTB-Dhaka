@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/WhatsAppService.php';
 
 $logger = getLogger('student');
 $pdo = getPDO();
@@ -67,6 +68,70 @@ try {
         try {
             $pdo->beginTransaction();
 
+            // Check registration window for this program
+            // Find the semester with an active registration window (any semester number)
+            $stmt = $pdo->prepare("
+                SELECT ac.registration_start, ac.registration_end, ac.semester_number, ac.academic_year, p.id as program_id
+                FROM academic_calendar ac
+                JOIN programs p ON ac.program_id = p.id
+                WHERE p.name = ?
+                AND ac.registration_start IS NOT NULL
+                AND ac.registration_end IS NOT NULL
+                AND ac.status IN ('active', 'upcoming')
+                AND CURDATE() BETWEEN ac.registration_start AND ac.registration_end
+                ORDER BY ac.start_date DESC
+                LIMIT 1
+            ");
+            $stmt->execute([$program]);
+            $semesterInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            // If no active registration window, check for upcoming or any semester with registration dates
+            if (!$semesterInfo) {
+                $stmt = $pdo->prepare("
+                    SELECT ac.registration_start, ac.registration_end, ac.semester_number, ac.academic_year, p.id as program_id
+                    FROM academic_calendar ac
+                    JOIN programs p ON ac.program_id = p.id
+                    WHERE p.name = ?
+                    AND ac.registration_start IS NOT NULL
+                    AND ac.registration_end IS NOT NULL
+                    AND ac.status IN ('active', 'upcoming')
+                    ORDER BY ac.start_date DESC
+                    LIMIT 1
+                ");
+                $stmt->execute([$program]);
+                $semesterInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+            }
+
+            if (!$semesterInfo) {
+                $pdo->rollBack();
+                $logger->info('student POST: no active semester found', ['program' => $program]);
+                jsonResponse("error", "No active semester found for this program. Please contact administration.", [], 400);
+            }
+
+            // Check if within registration window (if dates are set)
+            $today = date('Y-m-d');
+            $regStart = $semesterInfo['registration_start'];
+            $regEnd = $semesterInfo['registration_end'];
+
+            if ($regStart && $regEnd) {
+                if ($today < $regStart) {
+                    $pdo->rollBack();
+                    $openDate = date('F j, Y', strtotime($regStart));
+                    $logger->info('student POST: registration not yet open', ['program' => $program, 'opens' => $regStart]);
+                    jsonResponse("error", "Registration opens on $openDate. Please try again after this date.", [], 400);
+                }
+                if ($today > $regEnd) {
+                    $pdo->rollBack();
+                    $closeDate = date('F j, Y', strtotime($regEnd));
+                    $logger->info('student POST: registration closed', ['program' => $program, 'closed' => $regEnd]);
+                    jsonResponse("error", "Registration closed on $closeDate. Please contact administration for late registration.", [], 400);
+                }
+            }
+
+            // Store semester info for later use
+            $targetSemester = $semesterInfo['semester_number'];
+            $targetAcademicYear = $semesterInfo['academic_year'];
+
             // uniqueness check
             $stmt = $pdo->prepare("SELECT 1 FROM students WHERE email = ? LIMIT 1");
             $stmt->execute([$email]);
@@ -78,14 +143,19 @@ try {
 
             // generate temporary serial
             $temporarySerialNumber = "TEMP" . substr(md5(uniqid((string)microtime(true), true)), 0, 10);
+            
+            // Calculate admission year from current date
+            $currentYear = (int)date('Y');
 
             $stmt = $pdo->prepare("
                 INSERT INTO students 
-                    (name, email, phone, alternatePhone, date_of_birth, state, gender, qualification, program, temporary_serial_number, password)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, email, phone, date_of_birth, state, gender, qualification, program, 
+                     temporary_serial_number, password, semester, year, academic_year, alternatePhone)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt->execute([
-                $name, $email, $phone, $alternatePhone, $date_of_birth, $state, $gender, $qualification, $program, $temporarySerialNumber, $hashedPassword
+                $name, $email, $phone, $date_of_birth, $state, $gender, $qualification, $program, 
+                $temporarySerialNumber, $hashedPassword, $targetSemester, $currentYear, $targetAcademicYear, $alternatePhone
             ]);
 
             $studentId = (int)$pdo->lastInsertId();
@@ -96,29 +166,24 @@ try {
 
             $pdo->commit();
 
-            // Craft WhatsApp message (do NOT send sensitive info in logs)
-            $institutionName = "GTB National College Dhaka";
-            $message = "Welcome to {$institutionName},\nDear {$name},\nThank you for registering with us! Your Temporary Serial Number is {$temporarySerialNumber} and your password is {$rawPassword}. Please log in to continue your journey with us!";
-
-            // Attempt to send WhatsApp message via Twilio — commented out but safely logged if attempted
+            // Send WhatsApp welcome message (non-breaking - fails silently)
             $sentWelcomeMessage = 0;
-            /*
             try {
-                require_once __DIR__ . '/../vendor/autoload.php';
-                use Twilio\Rest\Client;
-                $sid = 'YOUR_TWILIO_SID';
-                $token = 'YOUR_TWILIO_AUTH_TOKEN';
-                $twilio = new Client($sid, $token);
-                $twilio->messages->create(
-                    "whatsapp:{$phone}",
-                    ['from' => "whatsapp:+YOUR_TWILIO_NUMBER", 'body' => $message]
-                );
-                $sentWelcomeMessage = 1;
+                $whatsappService = new WhatsAppService($logger);
+                if ($whatsappService->isEnabled()) {
+                    $sent = $whatsappService->sendWelcomeMessage($phone, $name, $temporarySerialNumber);
+                    if ($sent) {
+                        $sentWelcomeMessage = 1;
+                        $logger->info('Welcome WhatsApp sent successfully', ['student_id' => $studentId]);
+                    }
+                }
             } catch (Exception $e) {
-                $logger->error('student POST: WhatsApp send failed', ['error' => $e->getMessage(), 'student_id' => $studentId]);
-                // do not fail registration if message sending fails
+                // Silent failure - registration continues normally
+                $logger->error('WhatsApp service error (non-critical)', [
+                    'error' => $e->getMessage(),
+                    'student_id' => $studentId
+                ]);
             }
-            */
 
             // Update sent_welcome_message flag
             try {
@@ -153,7 +218,20 @@ try {
         if ($endpoint === 'all_students') {
             $admin = authenticate('admin');
             try {
-                $stmt = $pdo->query("SELECT id, name, email, program, date_of_birth, alternatePhone, semester, sent_welcome_message FROM students");
+                $stmt = $pdo->query("
+                    SELECT 
+                        s.id, 
+                        s.name, 
+                        s.email, 
+                        s.program, 
+                        s.date_of_birth, 
+                        s.alternatePhone as phone,
+                        s.semester, 
+                        s.sent_welcome_message,
+                        a.approved as approval_status
+                    FROM students s
+                    LEFT JOIN approvals a ON s.id = a.student_id
+                ");
                 $students = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 $logger->info('student GET: all_students fetched', ['count' => count($students), 'actor' => $admin->id ?? null]);
                 jsonResponse("success", "Students retrieved successfully.", ['data' => $students], 200);

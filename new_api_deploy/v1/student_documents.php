@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../services/StorageService.php';
+
+use Services\StorageService;
 
 $logger = getLogger('student_documents');
 $pdo = getPDO();
@@ -94,63 +97,47 @@ try {
             jsonResponse("error", "Invalid file type. Only PDF, JPG, and PNG are allowed.", [], 400);
         }
 
-        // Create upload directory if it doesn't exist
-        $uploadDir = realpath(__DIR__ . '/../uploads/documents');
-        if ($uploadDir === false) {
-            $uploadDir = __DIR__ . '/../uploads/documents/';
-            if (!is_dir($uploadDir) && !mkdir($uploadDir, 0755, true)) {
-                $logger->error('documents POST - failed to create upload directory', ['dir' => $uploadDir]);
-                jsonResponse("error", "Failed to create upload directory.", [], 500);
-            }
-        }
-        if (!is_writable($uploadDir)) {
-            $logger->error('documents POST - upload directory not writable', ['dir' => $uploadDir]);
-            jsonResponse("error", "Upload directory is not writable.", [], 500);
-        }
-
         // Generate secure unique file name
         $safeBase = preg_replace('/[^A-Za-z0-9_\-\.]/', '_', pathinfo($originalName, PATHINFO_FILENAME));
         $newFileName = uniqid($student_id . '_') . '_' . $safeBase . '.' . $ext;
-        $targetFilePath = rtrim($uploadDir, '/\\') . DIRECTORY_SEPARATOR . $newFileName;
-
-        if (!move_uploaded_file($file['tmp_name'], $targetFilePath)) {
-            $logger->error('documents POST - move_uploaded_file failed', ['tmp' => $file['tmp_name'], 'target' => $targetFilePath, 'actor' => $user->id ?? null]);
-            jsonResponse("error", "Failed to upload file.", [], 500);
-        }
-
-        // Store relative path in DB for portability
         $relativePath = 'uploads/documents/' . $newFileName;
 
         $document_type = isset($_POST['document_type']) ? trim((string)$_POST['document_type']) : null;
 
-        try {
-            $stmt = $pdo->prepare("
-                INSERT INTO documents (student_id, document_path, upload_date, file_size, file_type, document_type)
-                VALUES (?, ?, NOW(), ?, ?, ?)
-            ");
-            $stmt->execute([
-                $student_id,
-                $relativePath,
-                $fileSize,
-                $mimeType,
-                $document_type
-            ]);
+        // Use StorageService for upload (handles both local and S3)
+        $storage = StorageService::getInstance();
+        if ($storage->upload($file['tmp_name'], $relativePath)) {
+            try {
+                $stmt = $pdo->prepare("
+                    INSERT INTO documents (student_id, document_path, upload_date, file_size, file_type, document_type)
+                    VALUES (?, ?, NOW(), ?, ?, ?)
+                ");
+                $stmt->execute([
+                    $student_id,
+                    $relativePath,
+                    $fileSize,
+                    $mimeType,
+                    $document_type
+                ]);
 
-            $logger->info('documents POST - uploaded and saved', [
-                'document_id' => $pdo->lastInsertId(),
-                'student_id' => $student_id,
-                'path' => $relativePath,
-                'size' => $fileSize
-            ]);
+                $logger->info('documents POST - uploaded and saved', [
+                    'document_id' => $pdo->lastInsertId(),
+                    'student_id' => $student_id,
+                    'path' => $relativePath,
+                    'size' => $fileSize,
+                    'storage' => StorageService::getDriverName()
+                ]);
 
-            jsonResponse("success", "Document uploaded successfully.", [], 200);
-        } catch (PDOException $e) {
-            // cleanup file on DB failure
-            if (file_exists($targetFilePath)) {
-                @unlink($targetFilePath);
+                jsonResponse("success", "Document uploaded successfully.", [], 200);
+            } catch (PDOException $e) {
+                // cleanup file on DB failure
+                $storage->delete($relativePath);
+                $logger->error('documents POST - DB insert failed', ['error' => $e->getMessage(), 'actor' => $user->id ?? null]);
+                jsonResponse("error", "Failed to save document: " . $e->getMessage(), [], 500);
             }
-            $logger->error('documents POST - DB insert failed', ['error' => $e->getMessage(), 'actor' => $user->id ?? null]);
-            jsonResponse("error", "Failed to save document: " . $e->getMessage(), [], 500);
+        } else {
+            $logger->error('documents POST - upload failed', ['tmp' => $file['tmp_name'], 'path' => $relativePath, 'storage' => StorageService::getDriverName(), 'actor' => $user->id ?? null]);
+            jsonResponse("error", "Failed to upload file.", [], 500);
         }
     }
 
@@ -183,22 +170,18 @@ try {
             }
 
             $filePath = $document['document_path'];
-            // Support both stored relative and absolute paths
-            $absolutePath = $filePath;
-            if (!file_exists($absolutePath)) {
-                $absolutePath = __DIR__ . '/../' . ltrim($filePath, '/\\');
-            }
-
-            if (file_exists($absolutePath) && is_writable($absolutePath)) {
-                @unlink($absolutePath);
-                $logger->info('documents DELETE - file removed', ['path' => $absolutePath, 'document_id' => $document_id]);
-            } else {
-                $logger->warning('documents DELETE - file missing or not writable', ['path' => $absolutePath, 'document_id' => $document_id]);
-            }
 
             // Delete the document from the database
             $stmt = $pdo->prepare("DELETE FROM documents WHERE id = ? AND student_id = ?");
             $stmt->execute([$document_id, $student_id]);
+
+            // Delete file from storage (local or S3)
+            $storage = StorageService::getInstance();
+            if ($storage->delete($filePath)) {
+                $logger->info('documents DELETE - file removed', ['path' => $filePath, 'document_id' => $document_id, 'storage' => StorageService::getDriverName()]);
+            } else {
+                $logger->warning('documents DELETE - file deletion failed', ['path' => $filePath, 'document_id' => $document_id, 'storage' => StorageService::getDriverName()]);
+            }
 
             $logger->info('documents DELETE - DB record removed', ['document_id' => $document_id, 'student_id' => $student_id]);
             jsonResponse("success", "Document deleted successfully.", [], 200);

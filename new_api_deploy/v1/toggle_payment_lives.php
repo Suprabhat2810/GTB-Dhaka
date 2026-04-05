@@ -82,18 +82,33 @@ try {
     try {
         $pdo->beginTransaction();
 
-        // Update existing rows; if none updated, insert a new row for the program (idempotent)
-        $stmt = $pdo->prepare("UPDATE fee_settings SET is_live = ?, updated_by = ?, updated_at = NOW() WHERE program = ?");
-        $stmt->execute([$isLive ? 1 : 0, $actor, $program]);
-        $rows = $stmt->rowCount();
+        // NEW: Only update the ACTIVE version (respects fee versioning)
+        // Get the active fee_settings for this program
+        $stmt = $pdo->prepare("SELECT id FROM fee_settings WHERE program = ? AND is_active = 1 LIMIT 1");
+        $stmt->execute([$program]);
+        $activeId = $stmt->fetchColumn();
 
-        if ($rows === 0) {
-            // Insert a new fee_settings row (we don't know total_fee here, so set NULL)
-            $stmtIns = $pdo->prepare("INSERT INTO fee_settings (program, total_fee, updated_by, updated_at, is_live) VALUES (?, NULL, ?, NOW(), ?)");
-            $stmtIns->execute([$program, $actor, $isLive ? 1 : 0]);
-            $logger->info('toggle_payment: inserted fee_settings row for program', ['program' => $program, 'actor' => $actor]);
+        if ($activeId) {
+            // Update the active version only
+            $stmt = $pdo->prepare("UPDATE fee_settings SET is_live = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+            $stmt->execute([$isLive ? 1 : 0, $actor, $activeId]);
+            $logger->info('toggle_payment: updated active fee_settings version', ['id' => $activeId, 'program' => $program, 'actor' => $actor]);
         } else {
-            $logger->info('toggle_payment: updated fee_settings rows', ['rows' => $rows, 'program' => $program, 'actor' => $actor]);
+            // No active version found, try to get the latest one
+            $stmt = $pdo->prepare("SELECT id FROM fee_settings WHERE program = ? ORDER BY version DESC, updated_at DESC LIMIT 1");
+            $stmt->execute([$program]);
+            $latestId = $stmt->fetchColumn();
+            
+            if ($latestId) {
+                // Mark it as active and update is_live
+                $stmt = $pdo->prepare("UPDATE fee_settings SET is_live = ?, is_active = 1, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->execute([$isLive ? 1 : 0, $actor, $latestId]);
+                $logger->info('toggle_payment: activated and updated latest fee_settings', ['id' => $latestId, 'program' => $program, 'actor' => $actor]);
+            } else {
+                // No fee settings exist for this program - log error
+                $logger->error('toggle_payment: no fee_settings found for program', ['program' => $program]);
+                throw new Exception("No fee settings found for program: $program");
+            }
         }
 
         $pdo->commit();
