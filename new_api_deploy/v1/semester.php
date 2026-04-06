@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/../config.php';
 
+$logger = getLogger('semester');
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method !== 'GET') {
@@ -32,9 +33,9 @@ try {
         jsonResponse('success', 'Semesters fetched successfully.', ['semesters' => $semesters], 200);
     }
 } catch (PDOException $e) {
-    $log->error('Failed to fetch semesters: ' . $e->getMessage());
+    $logger->error('Failed to fetch semesters: ' . $e->getMessage());
     jsonResponse('error', 'Database error occurred while fetching semesters.', [], 500);
 } catch (Exception $e) {
-    $log->error('Unexpected error: ' . $e->getMessage());
+    $logger->error('Unexpected error: ' . $e->getMessage());
     jsonResponse('error', 'Unexpected server error.', [], 500);
 }

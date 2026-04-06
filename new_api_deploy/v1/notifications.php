@@ -23,6 +23,34 @@ try {
             jsonResponse("error", "Invalid JSON payload.", [], 400);
         }
 
+        // === Rate Limiting: Prevent notification spam ===
+        $rateLimitMinutes = 1; // Time window
+        $maxNotificationsPerWindow = 10; // Max notifications per admin per minute
+        
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) FROM notifications 
+            WHERE notification_date >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+            AND id IN (
+                SELECT MAX(id) FROM notifications 
+                GROUP BY message, student_id 
+                HAVING COUNT(*) > 0
+            )
+            LIMIT ?
+        ");
+        $stmt->execute([$rateLimitMinutes, $maxNotificationsPerWindow + 1]);
+        $recentCount = (int)$stmt->fetchColumn();
+        
+        if ($recentCount >= $maxNotificationsPerWindow) {
+            $logger->warning('notifications POST: rate limit exceeded', [
+                'actor' => $actor,
+                'recent_count' => $recentCount,
+                'limit' => $maxNotificationsPerWindow
+            ]);
+            jsonResponse("error", "Rate limit exceeded. Please wait before sending more notifications.", [
+                'retry_after_seconds' => $rateLimitMinutes * 60
+            ], 429);
+        }
+
         // === New notification flow ===
         if (isset($data['message'])) {
             $message = trim((string)$data['message']);

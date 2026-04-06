@@ -27,7 +27,26 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 try {
     $logger->info('programs.php - fetching programs');
 
-    $stmt = $pdo->query("SELECT id, name FROM programs");
+    // Fetch programs with registration settings (backward compatible)
+    $sql = "
+        SELECT 
+            p.id,
+            p.name,
+            p.program_code,
+            p.is_active,
+            ps.registration_open,
+            ps.registration_start,
+            ps.registration_end,
+            ps.contact_email,
+            ps.contact_whatsapp,
+            ps.query_message
+        FROM programs p
+        LEFT JOIN program_settings ps ON p.id = ps.program_id
+        WHERE p.is_active = 1
+        ORDER BY p.name ASC
+    ";
+    
+    $stmt = $pdo->query($sql);
     $programs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $durationMs = round((microtime(true) - $start) * 1000, 2);

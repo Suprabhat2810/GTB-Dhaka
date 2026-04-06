@@ -377,35 +377,80 @@ try {
                 jsonResponse("error", "Invalid program ID specified.", [], 400);
             }
 
-            if (empty($subjectIds)) {
-                // Delete ALL subjects for this program+semester
-                $stmt = $pdo->prepare("DELETE FROM subjects WHERE department = ? AND semester = ?");
-                $stmt->execute([$programName, $semester]);
-                $deleteCount = $stmt->rowCount();
-                
-                $logger->info('subject_allocation DELETE: deleted all subjects', [
-                    'program' => $programName,
-                    'semester' => $semester,
-                    'deleted_count' => $deleteCount,
-                    'actor' => $actor
-                ]);
-                jsonResponse("success", "Deleted all subjects for this semester.", ['deleted_count' => $deleteCount], 200);
-            } else {
-                // Delete specific subjects by ID
-                $placeholders = implode(',', array_fill(0, count($subjectIds), '?'));
-                $stmt = $pdo->prepare("DELETE FROM subjects WHERE id IN ($placeholders) AND department = ? AND semester = ?");
-                $params = array_merge($subjectIds, [$programName, $semester]);
-                $stmt->execute($params);
-                $deleteCount = $stmt->rowCount();
-                
-                $logger->info('subject_allocation DELETE: deleted specific subjects', [
-                    'program' => $programName,
-                    'semester' => $semester,
-                    'subject_ids' => $subjectIds,
-                    'deleted_count' => $deleteCount,
-                    'actor' => $actor
-                ]);
-                jsonResponse("success", "Deleted $deleteCount subject(s) successfully.", ['deleted_count' => $deleteCount], 200);
+            // Start transaction for atomic deletion
+            $pdo->beginTransaction();
+            
+            try {
+                if (empty($subjectIds)) {
+                    // Delete ALL subjects for this program+semester
+                    
+                    // First, get all subject IDs to delete
+                    $stmt = $pdo->prepare("SELECT id FROM subjects WHERE department = ? AND semester = ?");
+                    $stmt->execute([$programName, $semester]);
+                    $subjectsToDelete = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                    
+                    if (!empty($subjectsToDelete)) {
+                        // Delete related student_subjects records first
+                        $placeholders = implode(',', array_fill(0, count($subjectsToDelete), '?'));
+                        $stmt = $pdo->prepare("DELETE FROM student_subjects WHERE subject_id IN ($placeholders)");
+                        $stmt->execute($subjectsToDelete);
+                        $relatedDeleted = $stmt->rowCount();
+                        
+                        // Now delete the subjects
+                        $stmt = $pdo->prepare("DELETE FROM subjects WHERE department = ? AND semester = ?");
+                        $stmt->execute([$programName, $semester]);
+                        $deleteCount = $stmt->rowCount();
+                        
+                        $pdo->commit();
+                        
+                        $logger->info('subject_allocation DELETE: deleted all subjects', [
+                            'program' => $programName,
+                            'semester' => $semester,
+                            'deleted_count' => $deleteCount,
+                            'related_student_subjects_deleted' => $relatedDeleted,
+                            'actor' => $actor
+                        ]);
+                        jsonResponse("success", "Deleted all subjects for this semester.", [
+                            'deleted_count' => $deleteCount,
+                            'related_records_deleted' => $relatedDeleted
+                        ], 200);
+                    } else {
+                        $pdo->commit();
+                        jsonResponse("success", "No subjects found to delete.", ['deleted_count' => 0], 200);
+                    }
+                } else {
+                    // Delete specific subjects by ID
+                    
+                    // First, delete related student_subjects records
+                    $placeholders = implode(',', array_fill(0, count($subjectIds), '?'));
+                    $stmt = $pdo->prepare("DELETE FROM student_subjects WHERE subject_id IN ($placeholders)");
+                    $stmt->execute($subjectIds);
+                    $relatedDeleted = $stmt->rowCount();
+                    
+                    // Now delete the subjects
+                    $stmt = $pdo->prepare("DELETE FROM subjects WHERE id IN ($placeholders) AND department = ? AND semester = ?");
+                    $params = array_merge($subjectIds, [$programName, $semester]);
+                    $stmt->execute($params);
+                    $deleteCount = $stmt->rowCount();
+                    
+                    $pdo->commit();
+                    
+                    $logger->info('subject_allocation DELETE: deleted specific subjects', [
+                        'program' => $programName,
+                        'semester' => $semester,
+                        'subject_ids' => $subjectIds,
+                        'deleted_count' => $deleteCount,
+                        'related_student_subjects_deleted' => $relatedDeleted,
+                        'actor' => $actor
+                    ]);
+                    jsonResponse("success", "Deleted $deleteCount subject(s) successfully.", [
+                        'deleted_count' => $deleteCount,
+                        'related_records_deleted' => $relatedDeleted
+                    ], 200);
+                }
+            } catch (PDOException $e) {
+                $pdo->rollBack();
+                throw $e;
             }
         } catch (PDOException $e) {
             $logger->error('subject_allocation DELETE: DB error', ['error' => $e->getMessage(), 'actor' => $actor]);

@@ -25,6 +25,15 @@ try {
     // Sanitize path to prevent directory traversal
     $relativePath = str_replace(['..', '\\'], ['', '/'], $relativePath);
     
+    // Additional security: verify path doesn't contain suspicious patterns
+    if (preg_match('/\.\.|\\\\|\/\/|[<>:"|?*]/', $relativePath)) {
+        $logger->warning('Suspicious path pattern detected', [
+            'path' => $relativePath,
+            'actor' => $user->id ?? null
+        ]);
+        jsonResponse("error", "Invalid document path.", [], 400);
+    }
+    
     // Verify document exists in database and user has permission
     try {
         $stmt = $pdo->prepare("

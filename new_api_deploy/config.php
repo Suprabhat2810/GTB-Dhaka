@@ -169,10 +169,28 @@ function jsonResponse($status, $message, $data = [], $code = 200) {
 function authenticate($requiredRole = null) {
     $logger = getLogger();
 
-    // Extract Authorization header (case-insensitive)
-    $token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    // Extract Authorization header (case-insensitive) - try multiple methods
+    $token = '';
+    
+    // Method 1: Check $_SERVER['HTTP_AUTHORIZATION']
+    if (!empty($_SERVER['HTTP_AUTHORIZATION'])) {
+        $token = $_SERVER['HTTP_AUTHORIZATION'];
+    }
+    
+    // Method 2: Check getallheaders()
     if (empty($token) && function_exists('getallheaders')) {
         $headers = getallheaders();
+        foreach ($headers as $k => $v) {
+            if (strtolower($k) === 'authorization') {
+                $token = $v;
+                break;
+            }
+        }
+    }
+    
+    // Method 3: Check apache_request_headers() as fallback
+    if (empty($token) && function_exists('apache_request_headers')) {
+        $headers = apache_request_headers();
         foreach ($headers as $k => $v) {
             if (strtolower($k) === 'authorization') {
                 $token = $v;
@@ -184,8 +202,13 @@ function authenticate($requiredRole = null) {
     $token = trim(str_replace('Bearer ', '', (string)$token));
 
     if (!$token) {
-        $logger->warning('Authorization token missing');
+        $logger->warning('Authorization token missing', [
+            'http_auth' => $_SERVER['HTTP_AUTHORIZATION'] ?? 'not set',
+            'headers_available' => function_exists('getallheaders'),
+            'apache_headers_available' => function_exists('apache_request_headers')
+        ]);
         jsonResponse("error", "Authorization token missing.", [], 401);
+        exit;
     }
 
     // Try legacy base64 JSON (existing behaviour)
@@ -198,6 +221,7 @@ function authenticate($requiredRole = null) {
         if (isset($decodedData->exp) && $decodedData->exp < time()) {
             $logger->warning('Legacy token expired', ['sub' => $decodedData->sub ?? null]);
             jsonResponse("error", "Token expired.", [], 401);
+            exit;
         }
     } else {
         // Try real JWT if library present and secrets are configured
@@ -218,15 +242,18 @@ function authenticate($requiredRole = null) {
                 if (isset($decodedData->exp) && $decodedData->exp < (time() - 30)) {
                     $logger->warning('JWT expired', ['sub' => $decodedData->sub ?? null]);
                     jsonResponse("error", "Token expired.", [], 401);
+                    exit;
                 }
             } catch (Exception $e) {
                 $logger->error('Invalid JWT', ['error' => $e->getMessage()]);
                 jsonResponse("error", "Invalid token.", [], 401);
+                exit;
             }
         } else {
             // No library and not legacy -> invalid
             $logger->warning('Token decoding failed: neither legacy nor JWT decode available');
             jsonResponse("error", "Invalid token.", [], 401);
+            exit;
         }
     }
 
@@ -235,6 +262,7 @@ function authenticate($requiredRole = null) {
     if ($requiredRole && $role !== $requiredRole) {
         $logger->warning('Unauthorized access - role mismatch', ['role' => $role, 'required' => $requiredRole]);
         jsonResponse("error", "Unauthorized access.", [], 403);
+        exit;
     }
 
     $logger->info('Authentication successful', ['sub' => $decodedData->sub ?? null, 'role' => $role]);
