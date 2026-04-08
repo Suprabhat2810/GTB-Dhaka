@@ -57,9 +57,17 @@ if ($method === 'GET') {
                 ac.updated_at,
                 (SELECT COUNT(*) FROM students s 
                  JOIN approvals a ON s.id = a.student_id
-                 WHERE s.program = p.name 
-                 AND s.semester = ac.semester_number
-                 AND s.academic_year = ac.academic_year
+                 WHERE (
+                     -- New FK-based matching (preferred, faster)
+                     s.current_semester_id = ac.id
+                     OR (
+                         -- Fallback for students without FK (backward compatibility)
+                         s.current_semester_id IS NULL
+                         AND s.program = p.name 
+                         AND s.semester = ac.semester_number
+                         AND s.academic_year = ac.academic_year
+                     )
+                 )
                  AND a.approved = 1
                  AND s.final_registration_number IS NOT NULL) AS student_count
             FROM academic_calendar ac
@@ -197,12 +205,142 @@ if ($method === 'GET') {
 }
 
 // ============================================================
-// POST - Create new semester entry
+// POST - Create new semester entry or create all semesters
 // ============================================================
 elseif ($method === 'POST') {
     try {
         $data = json_decode(file_get_contents('php://input'), true);
         
+        // Check if this is a bulk create request
+        if (isset($data['action']) && $data['action'] === 'create_all_semesters') {
+            // Validate required fields for bulk create
+            $required = ['program_id', 'academic_year', 'duration_years'];
+            foreach ($required as $field) {
+                if (!isset($data[$field]) || empty($data[$field])) {
+                    http_response_code(400);
+                    echo json_encode(['success' => false, 'message' => "Missing required field: $field"]);
+                    exit;
+                }
+            }
+            
+            $programId = (int)$data['program_id'];
+            $academicYear = $data['academic_year'];
+            $durationYears = (int)$data['duration_years'];
+            $sessionName = isset($data['session_name']) ? $data['session_name'] : null;
+            $totalSemesters = $durationYears * 2;
+            
+            // Get program info
+            $progStmt = $pdo->prepare("SELECT name FROM programs WHERE id = ?");
+            $progStmt->execute([$programId]);
+            $program = $progStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$program) {
+                http_response_code(404);
+                echo json_encode(['success' => false, 'message' => 'Program not found']);
+                exit;
+            }
+            
+            // Calculate start date (default to July 1st of the academic year's first year)
+            $yearParts = explode('-', $academicYear);
+            $startYear = (int)$yearParts[0];
+            
+            $createdSemesters = [];
+            $skippedSemesters = [];
+            $pdo->beginTransaction();
+            
+            try {
+                for ($i = 1; $i <= $totalSemesters; $i++) {
+                    // Calculate dates for each semester
+                    // Odd semesters: July-November, Even semesters: December-April
+                    $yearOffset = floor(($i - 1) / 2);
+                    $currentYear = $startYear + $yearOffset;
+                    
+                    if ($i % 2 === 1) {
+                        // Odd semester (July-November)
+                        $startDate = "$currentYear-07-01";
+                        $endDate = "$currentYear-11-30";
+                        // Use custom session name if provided, otherwise default
+                        $semesterName = $sessionName ? "$sessionName - Semester $i" : "Fall $currentYear - Semester $i";
+                    } else {
+                        // Even semester (December-April)
+                        $nextYear = $currentYear + 1;
+                        $startDate = "$currentYear-12-01";
+                        $endDate = "$nextYear-04-30";
+                        // Use custom session name if provided, otherwise default
+                        $semesterName = $sessionName ? "$sessionName - Semester $i" : "Spring $nextYear - Semester $i";
+                    }
+                    
+                    // Check if semester already exists with the SAME name pattern
+                    // This allows multiple sessions (e.g., "Upgrad2026" and "Spring2025") to have their own Semester 1-8
+                    $checkStmt = $pdo->prepare("
+                        SELECT id, semester_name FROM academic_calendar 
+                        WHERE program_id = ? AND semester_number = ? AND semester_name LIKE ?
+                    ");
+                    $namePattern = $sessionName ? "$sessionName%" : "%";
+                    $checkStmt->execute([$programId, $i, $namePattern]);
+                    $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if (!$existing) {
+                        // Insert semester
+                        $stmt = $pdo->prepare("
+                            INSERT INTO academic_calendar 
+                            (program_id, academic_year, semester_number, semester_name, start_date, end_date, status, is_current)
+                            VALUES (?, ?, ?, ?, ?, ?, 'upcoming', 0)
+                        ");
+                        
+                        $stmt->execute([
+                            $programId,
+                            $academicYear,
+                            $i,
+                            $semesterName,
+                            $startDate,
+                            $endDate
+                        ]);
+                        
+                        $createdSemesters[] = [
+                            'id' => (int)$pdo->lastInsertId(),
+                            'semester_number' => $i,
+                            'semester_name' => $semesterName,
+                            'start_date' => $startDate,
+                            'end_date' => $endDate
+                        ];
+                    } else {
+                        // Track skipped semesters
+                        $skippedSemesters[] = [
+                            'semester_number' => $i,
+                            'existing_name' => $existing['semester_name'],
+                            'reason' => 'Already exists'
+                        ];
+                    }
+                }
+                
+                $pdo->commit();
+                
+                $message = count($createdSemesters) . ' semesters created successfully';
+                if (count($skippedSemesters) > 0) {
+                    $skippedNumbers = array_map(function($s) { return $s['semester_number']; }, $skippedSemesters);
+                    $message .= '. Skipped existing semesters: ' . implode(', ', $skippedNumbers);
+                }
+                
+                echo json_encode([
+                    'success' => true,
+                    'message' => $message,
+                    'data' => [
+                        'semesters' => $createdSemesters,
+                        'total_created' => count($createdSemesters),
+                        'skipped' => $skippedSemesters,
+                        'total_skipped' => count($skippedSemesters)
+                    ]
+                ]);
+                exit;
+                
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                throw $e;
+            }
+        }
+        
+        // Regular single semester creation
         // Validate required fields
         $required = ['program_id', 'academic_year', 'semester_number', 'start_date', 'end_date'];
         foreach ($required as $field) {
@@ -236,15 +374,36 @@ elseif ($method === 'POST') {
             exit;
         }
         
-        // Check for duplicate
-        $checkStmt = $pdo->prepare("
-            SELECT id FROM academic_calendar 
-            WHERE program_id = ? AND academic_year = ? AND semester_number = ?
-        ");
-        $checkStmt->execute([$programId, $academicYear, $semesterNumber]);
+        // Check for duplicate - use session name pattern to allow multiple sessions with same semester numbers
+        // Extract session name prefix from semester_name (e.g., "Spring 2027" from "Spring 2027 - Semester 3")
+        $sessionPrefix = null;
+        if ($semesterName && strpos($semesterName, ' - Semester ') !== false) {
+            $sessionPrefix = substr($semesterName, 0, strpos($semesterName, ' - Semester '));
+        }
+        
+        if ($sessionPrefix) {
+            // Check if this specific session + semester number combination exists
+            $checkStmt = $pdo->prepare("
+                SELECT id FROM academic_calendar 
+                WHERE program_id = ? AND semester_number = ? AND semester_name LIKE ?
+            ");
+            $namePattern = $sessionPrefix . '%';
+            $checkStmt->execute([$programId, $semesterNumber, $namePattern]);
+        } else {
+            // Fallback to old check if no session name provided
+            $checkStmt = $pdo->prepare("
+                SELECT id FROM academic_calendar 
+                WHERE program_id = ? AND academic_year = ? AND semester_number = ?
+            ");
+            $checkStmt->execute([$programId, $academicYear, $semesterNumber]);
+        }
+        
         if ($checkStmt->fetch()) {
             http_response_code(409);
-            echo json_encode(['success' => false, 'message' => 'Semester already exists for this program and academic year']);
+            $msg = $sessionPrefix 
+                ? "Semester $semesterNumber already exists in session '$sessionPrefix'" 
+                : 'Semester already exists for this program and academic year';
+            echo json_encode(['success' => false, 'message' => $msg]);
             exit;
         }
         

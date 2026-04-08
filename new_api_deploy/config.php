@@ -118,8 +118,10 @@ function getPDO(): PDO {
         } catch (PDOException $e) {
             // log but keep the same behavior as before: die with message
             getLogger()->critical('DB connection failed', ['error' => $e->getMessage()]);
-            // fail-fast (same as original die)
-            die("Connection failed: " . $e->getMessage());
+            // fail-fast - sanitize error message in production
+            $isDebug = ($_ENV['APP_DEBUG'] ?? 'false') === 'true';
+            $errorMsg = $isDebug ? $e->getMessage() : 'Database connection failed. Please contact support.';
+            die("Connection failed: " . $errorMsg);
         }
     }
     return $pdo;
@@ -128,13 +130,14 @@ function getPDO(): PDO {
 // ---- CORS / Preflight handling ----
 $allowedOrigins = array_filter(array_map('trim', explode(',', $CORS_ALLOW_ORIGINS)));
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+
+// Only allow explicitly whitelisted origins (no wildcard in production)
+$isDebug = ($_ENV['APP_DEBUG'] ?? 'false') === 'true';
 if ($origin && in_array($origin, $allowedOrigins, true)) {
     header("Access-Control-Allow-Origin: {$origin}");
-} else {
-    // Fallback: if localhost dev or wildcard explicitly set, allow it (keeps non-breaking behavior if you used '*')
-    if ($CORS_ALLOW_ORIGINS === '*' || empty($allowedOrigins)) {
-        header("Access-Control-Allow-Origin: *");
-    }
+} elseif ($isDebug && ($CORS_ALLOW_ORIGINS === '*' || empty($allowedOrigins))) {
+    // Only allow wildcard in debug mode
+    header("Access-Control-Allow-Origin: *");
 }
 header("Access-Control-Allow-Headers: {$CORS_ALLOW_HEADERS}");
 header("Access-Control-Allow-Methods: {$CORS_ALLOW_METHODS}");

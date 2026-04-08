@@ -1,0 +1,35 @@
+# Environment files
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+new_api_deploy/v1/logs/
+
+# Vendor dependencies
+vendor/
+node_modules/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Uploaded files (optional - uncomment if you want to ignore uploads)
+# uploads/
+# new_api_deploy/uploads/
+
+# Database backups
+*.sql
+*.sql.gz
+
+# Temporary files
+*.tmp
+*.temp

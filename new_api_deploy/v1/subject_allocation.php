@@ -513,27 +513,29 @@ try {
                     jsonResponse("error", "Invalid program ID specified.", [], 400);
                 }
 
-                // Exclude current semester from previous allocations
-                $currentSemester = $semester; // Already fetched from $_GET above
-                
-                // Get distinct semesters with their most recent data (ignoring year)
+                // Get active/upcoming semesters from academic_calendar with their dates
+                // This ensures dates come from semester definition, not from subjects
                 $stmt = $pdo->prepare("
                     SELECT 
-                        semester,
-                        MAX(year) as academic_year,
-                        MAX(valid_from) as valid_from,
-                        MAX(valid_to) as valid_to,
-                        COUNT(*) as subject_count
-                    FROM subjects
-                    WHERE department = ?
-                      AND semester != ?
-                    GROUP BY semester
-                    ORDER BY semester ASC
+                        ac.semester_number as semester,
+                        ac.academic_year,
+                        ac.start_date as valid_from,
+                        ac.end_date as valid_to,
+                        ac.semester_name,
+                        ac.status,
+                        (SELECT COUNT(*) FROM subjects s 
+                         WHERE s.department = p.name 
+                         AND s.semester = ac.semester_number) as subject_count
+                    FROM academic_calendar ac
+                    JOIN programs p ON p.id = ac.program_id
+                    WHERE ac.program_id = ?
+                      AND ac.status IN ('active', 'upcoming')
+                    ORDER BY ac.semester_number ASC
                 ");
-                $stmt->execute([$programName, $currentSemester]);
+                $stmt->execute([$program]);
                 $allocations = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-                // Get subjects for each semester (most recent entries)
+                // Get subjects for each semester (for copy functionality)
                 foreach ($allocations as &$allocation) {
                     $stmt = $pdo->prepare("
                         SELECT subject_name, instructor, subject_code, credits, schedule, type
@@ -546,7 +548,7 @@ try {
                     $allocation['subjects'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 }
 
-                $logger->info('subject_allocation GET: previous allocations retrieved', ['program' => $programName, 'count' => count($allocations), 'actor' => $actor]);
+                $logger->info('subject_allocation GET: previous allocations retrieved from academic_calendar', ['program' => $programName, 'count' => count($allocations), 'actor' => $actor]);
                 jsonResponse("success", "Previous allocations retrieved successfully.", ["previous_allocations" => $allocations], 200);
             }
             // Get allocated subjects for program+semester
@@ -562,7 +564,7 @@ try {
                 $stmt = $pdo->prepare("
                     SELECT s.id, s.department, s.semester, s.year, s.subject_name, s.valid_from, s.valid_to, s.subject_code, s.instructor, s.schedule, s.credits, s.progress, s.type
                     FROM subjects s
-                    WHERE s.department = ? AND s.semester = ? AND s.valid_from <= CURDATE() AND s.valid_to >= CURDATE()
+                    WHERE s.department = ? AND s.semester = ?
                     ORDER BY s.subject_name ASC
                 ");
                 $stmt->execute([$programName, $semester]);

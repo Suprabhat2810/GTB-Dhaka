@@ -99,14 +99,30 @@ try {
             ");
             $stmt->execute([$studentId, $adminId]);
             
-            // Update student with semester and academic year
+            // Get Semester 1 FK from academic_calendar for this program and academic year
+            $semester1Stmt = $pdo->prepare("
+                SELECT ac.id 
+                FROM academic_calendar ac
+                JOIN students s ON s.id = ?
+                JOIN programs p ON s.program = p.name
+                WHERE ac.program_id = p.id
+                AND ac.semester_number = 1
+                AND ac.academic_year = ?
+                ORDER BY ac.created_at DESC
+                LIMIT 1
+            ");
+            $semester1Stmt->execute([$studentId, $academicYear]);
+            $semester1Id = $semester1Stmt->fetchColumn();
+            
+            // Update student with semester, academic year, and FK
             $stmt = $pdo->prepare("
                 UPDATE students 
                 SET semester = 1, 
-                    academic_year = ?
+                    academic_year = ?,
+                    current_semester_id = ?
                 WHERE id = ?
             ");
-            $stmt->execute([$academicYear, $studentId]);
+            $stmt->execute([$academicYear, $semester1Id, $studentId]);
 
             // copy student basic data into personal_info
             $stmt = $pdo->prepare("SELECT name, gender, date_of_birth FROM students WHERE id = ? LIMIT 1");
@@ -243,6 +259,17 @@ try {
         $address = trim(strip_tags((string)$data['address']));
         $previousBoardUniversity = trim(strip_tags((string)$data['previousBoardUniversity']));
         $lastClassResult = trim(strip_tags((string)$data['lastClassResult']));
+        
+        // Input length validation
+        if (strlen($fatherName) > 255 || strlen($motherName) > 255) {
+            jsonResponse("error", "Name fields are too long (max 255 characters).", [], 400);
+        }
+        if (strlen($address) > 500) {
+            jsonResponse("error", "Address is too long (max 500 characters).", [], 400);
+        }
+        if (strlen($aadhaarNumber) > 20) {
+            jsonResponse("error", "Aadhaar number is too long.", [], 400);
+        }
         $subjectsPapers = trim(strip_tags((string)$data['subjectsPapers']));
         $additionalSubjects = trim(strip_tags((string)($data['additionalSubjects'] ?? '')));
 

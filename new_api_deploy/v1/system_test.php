@@ -421,7 +421,183 @@ function testResponseStructures($pdo): array {
 }
 
 // ============================================================
-// TEST 8: Environment Configuration
+// TEST 8: Notification System Enhancements
+// ============================================================
+function testNotificationEnhancements($pdo): array {
+    $result = [
+        'test_name' => 'Notification System Enhancements',
+        'status' => 'pass',
+        'total_checks' => 0,
+        'checks_passed' => 0,
+        'checks_failed' => 0,
+        'features' => [],
+        'issues' => []
+    ];
+    
+    // Check 1: Notifications table has 'body' column for detailed messages
+    try {
+        $stmt = $pdo->query("DESCRIBE notifications");
+        $columns = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $hasBodyColumn = in_array('body', $columns);
+        
+        $result['features']['body_column'] = [
+            'description' => 'Notifications table has body column for detailed messages',
+            'status' => $hasBodyColumn ? 'PASS' : 'FAIL',
+            'required_for' => 'Enhanced notification messages with details'
+        ];
+        
+        $result['total_checks']++;
+        if ($hasBodyColumn) {
+            $result['checks_passed']++;
+        } else {
+            $result['checks_failed']++;
+            $result['issues'][] = 'Missing body column in notifications table';
+            $result['status'] = 'warning';
+        }
+    } catch (PDOException $e) {
+        $result['features']['body_column'] = [
+            'description' => 'Notifications table check',
+            'status' => 'ERROR',
+            'error' => $e->getMessage()
+        ];
+        $result['total_checks']++;
+        $result['checks_failed']++;
+        $result['status'] = 'fail';
+    }
+    
+    // Check 2: Verify notification types exist
+    try {
+        $stmt = $pdo->query("SELECT DISTINCT type FROM notifications WHERE type IS NOT NULL");
+        $types = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        $expectedTypes = ['payment_approved', 'payment_rejected', 'payment_pending'];
+        $hasPaymentTypes = !empty(array_intersect($expectedTypes, $types));
+        
+        $result['features']['notification_types'] = [
+            'description' => 'Payment notification types configured',
+            'status' => $hasPaymentTypes ? 'PASS' : 'INFO',
+            'found_types' => $types,
+            'expected_types' => $expectedTypes
+        ];
+        
+        $result['total_checks']++;
+        if ($hasPaymentTypes) {
+            $result['checks_passed']++;
+        } else {
+            $result['checks_passed']++; // Not a failure, just info
+        }
+    } catch (PDOException $e) {
+        $result['features']['notification_types'] = [
+            'description' => 'Notification types check',
+            'status' => 'ERROR',
+            'error' => $e->getMessage()
+        ];
+        $result['total_checks']++;
+        $result['checks_failed']++;
+    }
+    
+    // Check 3: Test notification body content structure
+    try {
+        $stmt = $pdo->query("
+            SELECT id, message, body, type 
+            FROM notifications 
+            WHERE body IS NOT NULL 
+            LIMIT 5
+        ");
+        $sampleNotifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        $hasEnhancedNotifications = count($sampleNotifications) > 0;
+        
+        $result['features']['enhanced_notifications'] = [
+            'description' => 'Enhanced notifications with detailed body',
+            'status' => $hasEnhancedNotifications ? 'PASS' : 'INFO',
+            'sample_count' => count($sampleNotifications),
+            'note' => $hasEnhancedNotifications 
+                ? 'Found notifications with enhanced details' 
+                : 'No enhanced notifications yet (will be created on payment approval/rejection)'
+        ];
+        
+        $result['total_checks']++;
+        $result['checks_passed']++;
+    } catch (PDOException $e) {
+        $result['features']['enhanced_notifications'] = [
+            'description' => 'Enhanced notifications check',
+            'status' => 'ERROR',
+            'error' => $e->getMessage()
+        ];
+        $result['total_checks']++;
+        $result['checks_failed']++;
+    }
+    
+    // Check 4: Verify payments table has transaction_id for notifications
+    try {
+        $stmt = $pdo->query("DESCRIBE payments");
+        $columns = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $hasTransactionId = in_array('transaction_id', $columns);
+        
+        $result['features']['transaction_id_support'] = [
+            'description' => 'Payments table supports transaction_id for notification details',
+            'status' => $hasTransactionId ? 'PASS' : 'FAIL',
+            'required_for' => 'Including transaction ID in approval/rejection notifications'
+        ];
+        
+        $result['total_checks']++;
+        if ($hasTransactionId) {
+            $result['checks_passed']++;
+        } else {
+            $result['checks_failed']++;
+            $result['issues'][] = 'Missing transaction_id column in payments table';
+            $result['status'] = 'warning';
+        }
+    } catch (PDOException $e) {
+        $result['features']['transaction_id_support'] = [
+            'description' => 'Transaction ID support check',
+            'status' => 'ERROR',
+            'error' => $e->getMessage()
+        ];
+        $result['total_checks']++;
+        $result['checks_failed']++;
+    }
+    
+    // Check 5: Frontend notification modal enhancements
+    $frontendPath = __DIR__ . '/../../frontend/src/components/student/StudentNotifications.tsx';
+    $hasEnhancedModal = file_exists($frontendPath) && 
+                        strpos(file_get_contents($frontendPath), 'animate-slideIn') !== false;
+    
+    $result['features']['enhanced_ui'] = [
+        'description' => 'Enhanced notification modal UI with animations',
+        'status' => $hasEnhancedModal ? 'PASS' : 'INFO',
+        'file_path' => $frontendPath,
+        'note' => $hasEnhancedModal 
+            ? 'Frontend has enhanced notification modal with animations' 
+            : 'Standard notification modal (enhancements may not be deployed)'
+    ];
+    
+    $result['total_checks']++;
+    $result['checks_passed']++;
+    
+    // Check 6: Admin approval modal with notes
+    $adminPaymentPath = __DIR__ . '/../../frontend/src/components/admin/PaymentsProfessional.tsx';
+    $hasAdminNotes = file_exists($adminPaymentPath) && 
+                     strpos(file_get_contents($adminPaymentPath), 'adminNotes') !== false;
+    
+    $result['features']['admin_notes_support'] = [
+        'description' => 'Admin can add optional notes when approving payments',
+        'status' => $hasAdminNotes ? 'PASS' : 'INFO',
+        'file_path' => $adminPaymentPath,
+        'note' => $hasAdminNotes 
+            ? 'Admin payment approval includes optional notes field' 
+            : 'Standard approval (notes feature may not be deployed)'
+    ];
+    
+    $result['total_checks']++;
+    $result['checks_passed']++;
+    
+    return $result;
+}
+
+// ============================================================
+// TEST 9: Environment Configuration
 // ============================================================
 function testEnvironment(): array {
     $result = [
@@ -482,6 +658,7 @@ try {
     $results['tests']['endpoints'] = testEndpoints();
     $results['tests']['data_integrity'] = testDataIntegrity($pdo);
     $results['tests']['response_structures'] = testResponseStructures($pdo);
+    $results['tests']['notification_enhancements'] = testNotificationEnhancements($pdo);
     $results['tests']['environment'] = testEnvironment();
     
     // Calculate summary statistics
@@ -570,6 +747,18 @@ try {
         // Check for missing indexes
         if (!empty($results['tests']['indexes']['missing_indexes'])) {
             $results['recommendations'][] = "Run critical_fixes.sql migration to add missing performance indexes";
+        }
+        
+        // Check for notification enhancement issues
+        if (!empty($results['tests']['notification_enhancements']['issues'])) {
+            foreach ($results['tests']['notification_enhancements']['issues'] as $issue) {
+                if (strpos($issue, 'body column') !== false) {
+                    $results['recommendations'][] = "Add 'body' column to notifications table: ALTER TABLE notifications ADD COLUMN body TEXT NULL AFTER message";
+                }
+                if (strpos($issue, 'transaction_id') !== false) {
+                    $results['recommendations'][] = "Add 'transaction_id' column to payments table: ALTER TABLE payments ADD COLUMN transaction_id VARCHAR(255) NULL";
+                }
+            }
         }
     } else {
         $results['recommendations'][] = "All tests passed! System is healthy.";

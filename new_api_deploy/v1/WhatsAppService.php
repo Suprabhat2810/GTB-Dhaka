@@ -54,9 +54,9 @@ class WhatsAppService
     }
 
     /**
-     * Send welcome message to newly registered student
+     * Send welcome message with login credentials to newly registered student
      */
-    public function sendWelcomeMessage($phone, $studentName, $registrationNumber = null)
+    public function sendWelcomeMessage($phone, $studentName, $registrationNumber = null, $password = null)
     {
         if (!$this->enabled) {
             return false;
@@ -67,18 +67,51 @@ class WhatsAppService
         $message .= "Thank you for registering with us! Your registration has been received successfully.\n\n";
         
         if ($registrationNumber) {
-            $message .= "📋 *Registration Number:* {$registrationNumber}\n\n";
+            $message .= "📋 *Your Login Credentials:*\n";
+            $message .= "• Registration Number: `{$registrationNumber}`\n";
+            if ($password) {
+                $message .= "• Password: `{$password}`\n\n";
+                $message .= "⚠️ *IMPORTANT:* Please keep these credentials safe and change your password after first login.\n\n";
+            }
         }
         
         $message .= "✅ *Next Steps:*\n";
-        $message .= "1. Complete your profile information\n";
-        $message .= "2. Upload required documents\n";
-        $message .= "3. Wait for admin approval\n\n";
+        $message .= "1. Login to your account\n";
+        $message .= "2. Complete your profile information\n";
+        $message .= "3. Upload required documents\n";
+        $message .= "4. Wait for admin approval\n\n";
         $message .= "We will notify you once your application is reviewed.\n\n";
         $message .= "Best regards,\n";
         $message .= "{$this->instituteName} Team";
 
         return $this->sendMessage($phone, $message, 'Welcome');
+    }
+
+    /**
+     * Send login credentials to student (one-time use)
+     */
+    public function sendCredentials($phone, $studentName, $registrationNumber, $password)
+    {
+        if (!$this->enabled) {
+            return false;
+        }
+
+        $message = "🔐 *Login Credentials - {$this->instituteName}*\n\n";
+        $message .= "Dear *{$studentName}*,\n\n";
+        $message .= "Your account has been created successfully!\n\n";
+        $message .= "📋 *Login Details:*\n";
+        $message .= "• Registration Number: `{$registrationNumber}`\n";
+        $message .= "• Password: `{$password}`\n\n";
+        $message .= "⚠️ *SECURITY NOTICE:*\n";
+        $message .= "• Keep these credentials confidential\n";
+        $message .= "• Do not share with anyone\n";
+        $message .= "• Change your password after first login\n";
+        $message .= "• Delete this message after saving credentials\n\n";
+        $message .= "🌐 Login at: https://gtbnc.co.in/login\n\n";
+        $message .= "Best regards,\n";
+        $message .= "{$this->instituteName} Team";
+
+        return $this->sendMessage($phone, $message, 'Credentials');
     }
 
     /**

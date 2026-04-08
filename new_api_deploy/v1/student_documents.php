@@ -30,9 +30,10 @@ try {
 
         $studentId = (int)($user->sub ?? $user->id ?? 0);
         $stmt = $pdo->prepare("
-            SELECT id, document_path, upload_date, file_size, file_type, document_type
+            SELECT id, document_path, upload_date, file_size, file_type, document_type, status
             FROM documents
             WHERE student_id = ?
+            ORDER BY upload_date DESC
         ");
         $stmt->execute([$studentId]);
         $documents = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -46,6 +47,7 @@ try {
                 'file_size' => (int)$doc['file_size'],
                 'file_type' => $doc['file_type'],
                 'document_type' => $doc['document_type'],
+                'status' => $doc['status'] ?? 'pending',
             ];
         }, $documents);
 
@@ -92,9 +94,39 @@ try {
         $originalName = basename($file['name'] ?? 'upload');
         $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
 
+        // Validate MIME type and extension
         if (!in_array($mimeType, $allowedMIMEs, true) || !in_array($ext, $allowedExtensions, true)) {
             $logger->warning('documents POST - invalid file type', ['mime' => $mimeType, 'ext' => $ext, 'actor' => $user->id ?? null]);
             jsonResponse("error", "Invalid file type. Only PDF, JPG, and PNG are allowed.", [], 400);
+        }
+
+        // Additional magic byte validation for security
+        $handle = fopen($file['tmp_name'], 'rb');
+        $magicBytes = fread($handle, 8);
+        fclose($handle);
+        
+        $validMagicBytes = false;
+        // PDF: %PDF
+        if (substr($magicBytes, 0, 4) === '%PDF') {
+            $validMagicBytes = true;
+        }
+        // JPEG: FF D8 FF
+        elseif (substr($magicBytes, 0, 3) === "\xFF\xD8\xFF") {
+            $validMagicBytes = true;
+        }
+        // PNG: 89 50 4E 47
+        elseif (substr($magicBytes, 0, 4) === "\x89\x50\x4E\x47") {
+            $validMagicBytes = true;
+        }
+        
+        if (!$validMagicBytes) {
+            $logger->warning('documents POST - invalid magic bytes', ['mime' => $mimeType, 'ext' => $ext, 'actor' => $user->id ?? null]);
+            jsonResponse("error", "File validation failed. File may be corrupted or not a valid document.", [], 400);
+        }
+        
+        // Validate filename length
+        if (strlen($originalName) > 255) {
+            jsonResponse("error", "Filename is too long (max 255 characters).", [], 400);
         }
 
         // Generate secure unique file name

@@ -129,12 +129,12 @@ try {
                 try {
                     $mail = new PHPMailer(true);
                     $mail->isSMTP();
-                    $mail->Host = 'smtp.example.com';
+                    $mail->Host = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
                     $mail->SMTPAuth = true;
-                    $mail->Username = 'your_email@example.com';
-                    $mail->Password = 'your_password';
-                    $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-                    $mail->Port = 587;
+                    $mail->Username = getenv('SMTP_USERNAME') ?: '';
+                    $mail->Password = getenv('SMTP_PASSWORD') ?: '';
+                    $mail->SMTPSecure = (getenv('SMTP_ENCRYPTION') === 'ssl') ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
+                    $mail->Port = getenv('SMTP_PORT') ?: 587;
 
                     $mail->setFrom('no-reply@yourdomain.com', 'Your Institution');
                     $mail->Subject = 'Notification';

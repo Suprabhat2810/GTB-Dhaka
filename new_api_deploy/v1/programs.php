@@ -34,6 +34,8 @@ try {
             p.name,
             p.program_code,
             p.is_active,
+            p.duration_years,
+            p.total_semesters,
             ps.registration_open,
             ps.registration_start,
             ps.registration_end,

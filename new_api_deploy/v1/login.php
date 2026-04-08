@@ -26,6 +26,17 @@ $email = isset($data['email']) ? filter_var($data['email'], FILTER_SANITIZE_EMAI
 $password = $data['password'] ?? '';
 $role = $data['role'] ?? '';
 
+// Input length validation
+if (strlen($email) > 255) {
+    jsonResponse("error", "Email is too long.", [], 400);
+}
+if (strlen($password) > 255) {
+    jsonResponse("error", "Password is too long.", [], 400);
+}
+if (strlen($role) > 20) {
+    jsonResponse("error", "Invalid role.", [], 400);
+}
+
 if (!$email || !$password || !$role) {
     $logger->info('Login missing parameters', ['email_present' => (bool)$email, 'role' => $role]);
     jsonResponse("error", "Email, password, and role are required.", [], 400);

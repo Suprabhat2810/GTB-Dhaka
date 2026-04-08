@@ -41,7 +41,22 @@ try {
         $gender = isset($payload['gender']) ? trim((string)$payload['gender']) : null;
         $qualification = isset($payload['qualification']) ? trim((string)$payload['qualification']) : null;
         $program = trim((string)$payload['program']);
-        $rawPassword = (string)$payload['password']; // kept for WhatsApp content (temporary)
+        $rawPassword = (string)$payload['password'];
+        
+        // Validate password strength
+        if (strlen($rawPassword) < 8) {
+            $logger->info('student POST: password too short', ['email' => $email]);
+            jsonResponse("error", "Password must be at least 8 characters long.", [], 400);
+        }
+        
+        // Input length validation
+        if (strlen($name) > 255) {
+            jsonResponse("error", "Name is too long (max 255 characters).", [], 400);
+        }
+        if (strlen($phone) > 20) {
+            jsonResponse("error", "Phone number is too long (max 20 characters).", [], 400);
+        }
+        
         $hashedPassword = password_hash($rawPassword, PASSWORD_BCRYPT);
         $date_of_birth = isset($payload['date_of_birth']) ? trim((string)$payload['date_of_birth']) : null;
 
@@ -166,15 +181,15 @@ try {
 
             $pdo->commit();
 
-            // Send WhatsApp welcome message (non-breaking - fails silently)
+            // Send WhatsApp with credentials (non-breaking - fails silently)
             $sentWelcomeMessage = 0;
             try {
                 $whatsappService = new WhatsAppService($logger);
                 if ($whatsappService->isEnabled()) {
-                    $sent = $whatsappService->sendWelcomeMessage($phone, $name, $temporarySerialNumber);
+                    $sent = $whatsappService->sendCredentials($phone, $name, $temporarySerialNumber, $rawPassword);
                     if ($sent) {
                         $sentWelcomeMessage = 1;
-                        $logger->info('Welcome WhatsApp sent successfully', ['student_id' => $studentId]);
+                        $logger->info('Credentials sent via WhatsApp successfully', ['student_id' => $studentId]);
                     }
                 }
             } catch (Exception $e) {
@@ -196,11 +211,15 @@ try {
 
             $logger->info('student POST: registration successful', ['student_id' => $studentId, 'email' => $email, 'temp_serial' => $temporarySerialNumber]);
 
-            // NOTE: returning raw password in response is legacy behavior — keep for compatibility but avoid logging it.
-            jsonResponse("success", "Student registered successfully.", [
+            // Password sent via WhatsApp - not returned in API response for security
+            $message = $sentWelcomeMessage 
+                ? "Registration successful! Your login credentials have been sent to your WhatsApp."
+                : "Registration successful! Please check your email for login details.";
+            
+            jsonResponse("success", $message, [
                 "temporary_serial_number" => $temporarySerialNumber,
                 "student_id" => $studentId,
-                "password" => $rawPassword
+                "credentials_sent_via_whatsapp" => (bool)$sentWelcomeMessage
             ], 201);
         } catch (PDOException $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();

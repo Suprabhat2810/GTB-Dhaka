@@ -24,13 +24,20 @@ try {
 
     // Sanitize path to prevent directory traversal
     $relativePath = str_replace(['..', '\\'], ['', '/'], $relativePath);
+    $relativePath = ltrim($relativePath, '/');
     
     // Additional security: verify path doesn't contain suspicious patterns
-    if (preg_match('/\.\.|\\\\|\/\/|[<>:"|?*]/', $relativePath)) {
+    if (preg_match('/\.\.|\\\\|[<>:"|?*]/', $relativePath)) {
         $logger->warning('Suspicious path pattern detected', [
             'path' => $relativePath,
             'actor' => $user->id ?? null
         ]);
+        jsonResponse("error", "Invalid document path.", [], 400);
+    }
+    
+    // Validate path length
+    if (strlen($relativePath) > 500) {
+        $logger->warning('Path too long', ['path_length' => strlen($relativePath), 'actor' => $user->id ?? null]);
         jsonResponse("error", "Invalid document path.", [], 400);
     }
     

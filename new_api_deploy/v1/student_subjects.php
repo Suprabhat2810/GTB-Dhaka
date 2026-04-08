@@ -51,7 +51,9 @@ try {
 
         $currentDate = date('Y-m-d');
 
-        // Fetch subjects active for this student (respect validity window)
+        // Fetch subjects allocated for this student's program and semester
+        // Date filtering removed - subjects visible immediately after allocation
+        // Dates still used for progress/day count calculation
         $stmt = $pdo->prepare("
             SELECT 
                 s.id,
@@ -65,17 +67,13 @@ try {
                 s.instructor,
                 s.schedule,
                 s.credits,
-                s.progress,
-                s.type
+                s.progress
             FROM subjects s
             WHERE s.department = ?
               AND s.semester = ?
-              AND s.year = ?
-              AND (s.valid_from IS NULL OR s.valid_from <= ?)
-              AND (s.valid_to IS NULL OR s.valid_to >= ?)
             ORDER BY s.subject_name ASC
         ");
-        $stmt->execute([$programName, $semester, $year, $currentDate, $currentDate]);
+        $stmt->execute([$programName, $semester]);
         $subjects = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         if (empty($subjects)) {
