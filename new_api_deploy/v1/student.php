@@ -5,9 +5,15 @@ declare(strict_types=1);
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/WhatsAppService.php';
+require_once __DIR__ . '/api_logger_middleware.php';
+require_once __DIR__ . '/../services/AuditService.php';
 
 $logger = getLogger('student');
 $pdo = getPDO();
+
+// Initialize API logger (safe - never breaks functionality)
+$apiLogger = createAPILogger($pdo, $logger);
+$apiLogger->start();
 $method = $_SERVER['REQUEST_METHOD'];
 $uri = $_SERVER['REQUEST_URI'];
 $uriParts = explode('/', parse_url($uri, PHP_URL_PATH));
@@ -184,7 +190,7 @@ try {
             // Send WhatsApp with credentials (non-breaking - fails silently)
             $sentWelcomeMessage = 0;
             try {
-                $whatsappService = new WhatsAppService($logger);
+                $whatsappService = new WhatsAppService($logger, $pdo);
                 if ($whatsappService->isEnabled()) {
                     $sent = $whatsappService->sendCredentials($phone, $name, $temporarySerialNumber, $rawPassword);
                     if ($sent) {
@@ -211,11 +217,41 @@ try {
 
             $logger->info('student POST: registration successful', ['student_id' => $studentId, 'email' => $email, 'temp_serial' => $temporarySerialNumber]);
 
+            // Audit logging (safe - wrapped in try-catch)
+            try {
+                $audit = new AuditService($pdo, $logger);
+                $audit->log(
+                    'student_registration',
+                    'student',
+                    'New student registered successfully',
+                    [
+                        'user_id' => $studentId,
+                        'user_type' => 'student',
+                        'user_email' => $email,
+                        'user_name' => $name,
+                        'entity_type' => 'student',
+                        'entity_id' => $studentId,
+                        'new_values' => [
+                            'name' => $name,
+                            'email' => $email,
+                            'program' => $program,
+                            'temporary_serial_number' => $temporarySerialNumber
+                        ],
+                        'status' => 'success'
+                    ]
+                );
+                $apiLogger->setUser($studentId, 'student');
+            } catch (Exception $e) {
+                // Silent failure - registration still succeeds
+                $logger->warning('Audit logging failed (non-critical)', ['error' => $e->getMessage()]);
+            }
+
             // Password sent via WhatsApp - not returned in API response for security
             $message = $sentWelcomeMessage 
                 ? "Registration successful! Your login credentials have been sent to your WhatsApp."
                 : "Registration successful! Please check your email for login details.";
             
+            $apiLogger->end(201);
             jsonResponse("success", $message, [
                 "temporary_serial_number" => $temporarySerialNumber,
                 "student_id" => $studentId,
@@ -224,6 +260,7 @@ try {
         } catch (PDOException $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             $logger->error('student POST: registration failed', ['error' => $e->getMessage()]);
+            $apiLogger->logError(500, 'Registration failed: ' . $e->getMessage());
             jsonResponse("error", "Registration failed.", [], 500);
         }
     }

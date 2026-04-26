@@ -6,9 +6,15 @@ require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/WhatsAppService.php';
 require_once __DIR__ . '/business_rules.php';
+require_once __DIR__ . '/api_logger_middleware.php';
+require_once __DIR__ . '/../services/AuditService.php';
 
 $logger = getLogger('payment');
 $pdo = getPDO();
+
+// Initialize API logger
+$apiLogger = createAPILogger($pdo, $logger);
+$apiLogger->start();
 $method = $_SERVER['REQUEST_METHOD'];
 $start = microtime(true);
 
@@ -726,7 +732,7 @@ try {
                 $student = $stmt->fetch(PDO::FETCH_ASSOC);
                 
                 if ($student && !empty($student['phone'])) {
-                    $whatsappService = new WhatsAppService($logger);
+                    $whatsappService = new WhatsAppService($logger, $pdo);
                     if ($whatsappService->isEnabled()) {
                         $paymentDate = date('d M Y');
                         $transactionId = 'TXN' . time() . $studentId;
@@ -1031,6 +1037,23 @@ try {
                 }
 
                 $logger->info('Admin approved payment', ['payment_id' => $paymentId, 'student_id' => $p['student_id'], 'admin_id' => $user->id]);
+                
+                // Audit logging (safe - wrapped in try-catch)
+                try {
+                    $audit = new AuditService($pdo, $logger);
+                    $audit->logPayment(
+                        $paymentId,
+                        'approved',
+                        ['payment_status' => 'pending'],
+                        ['payment_status' => 'paid', 'admin_notes' => $adminNotes ?? null],
+                        ['id' => $user->id, 'type' => 'admin']
+                    );
+                    $apiLogger->setUser($user->id, 'admin');
+                } catch (Exception $e) {
+                    $logger->warning('Audit logging failed (non-critical)', ['error' => $e->getMessage()]);
+                }
+                
+                $apiLogger->end(200);
                 jsonResponse("success", "Payment approved successfully.", [], 200);
             }
             
@@ -1100,6 +1123,23 @@ try {
                     'admin_id' => $user->id,
                     'reason' => $rejectionReason
                 ]);
+                
+                // Audit logging (safe - wrapped in try-catch)
+                try {
+                    $audit = new AuditService($pdo, $logger);
+                    $audit->logPayment(
+                        $paymentId,
+                        'rejected',
+                        ['payment_status' => 'pending'],
+                        ['payment_status' => 'rejected', 'rejection_reason' => $rejectionReason],
+                        ['id' => $user->id, 'type' => 'admin']
+                    );
+                    $apiLogger->setUser($user->id, 'admin');
+                } catch (Exception $e) {
+                    $logger->warning('Audit logging failed (non-critical)', ['error' => $e->getMessage()]);
+                }
+                
+                $apiLogger->end(200);
                 jsonResponse("success", "Payment rejected successfully.", [], 200);
             }
 

@@ -1,0 +1,46 @@
+# System Admin - Allow Access
+# Make sure Apache can access this directory
+
+# Allow from all
+<IfModule mod_authz_core.c>
+    Require all granted
+</IfModule>
+
+# For Apache 2.2
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Allow from all
+</IfModule>
+
+# Enable URL Rewriting
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /School_Project/Final_Enhancements/new_api_deploy/system-admin/
+    
+    # Rewrite /auth to /auth.php
+    RewriteRule ^auth$ auth.php [L,QSA]
+    
+    # Rewrite other endpoints without .php extension
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^([a-z-]+)$ $1.php [L,QSA]
+</IfModule>
+
+# Ensure PHP files are processed
+<IfModule mod_php7.c>
+    php_flag engine on
+</IfModule>
+
+# Set default handler for PHP
+AddHandler application/x-httpd-php .php
+
+# Directory index
+DirectoryIndex index.php index.html
+
+# CORS Headers
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "http://localhost:5173"
+    Header set Access-Control-Allow-Methods "POST, GET, OPTIONS, PUT, DELETE"
+    Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
+    Header set Access-Control-Allow-Credentials "true"
+</IfModule>

@@ -100,7 +100,14 @@ function getLogger(string $module = 'app'): Logger {
 function getPDO(): PDO {
     static $pdo = null;
     if ($pdo === null) {
-        global $DB_HOST, $DB_PORT, $DB_NAME, $DB_USER, $DB_PASS, $DB_PERSISTENT;
+        // Use $_ENV directly instead of global variables for better reliability
+        $DB_HOST = $_ENV['DB_HOST'] ?? 'localhost';
+        $DB_PORT = $_ENV['DB_PORT'] ?? '3306';
+        $DB_NAME = $_ENV['DB_NAME'] ?? '';
+        $DB_USER = $_ENV['DB_USER'] ?? '';
+        $DB_PASS = $_ENV['DB_PASS'] ?? '';
+        $DB_PERSISTENT = ($_ENV['DB_PERSISTENT'] ?? 'true') === 'true';
+        
         $dsn = sprintf(
             'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
             $DB_HOST,
@@ -128,25 +135,28 @@ function getPDO(): PDO {
 }
 
 // ---- CORS / Preflight handling ----
-$allowedOrigins = array_filter(array_map('trim', explode(',', $CORS_ALLOW_ORIGINS)));
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+// Skip if CORS headers already set by calling script (e.g., system-admin)
+if (!defined('CORS_ALREADY_SET')) {
+    $allowedOrigins = array_filter(array_map('trim', explode(',', $CORS_ALLOW_ORIGINS)));
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-// Only allow explicitly whitelisted origins (no wildcard in production)
-$isDebug = ($_ENV['APP_DEBUG'] ?? 'false') === 'true';
-if ($origin && in_array($origin, $allowedOrigins, true)) {
-    header("Access-Control-Allow-Origin: {$origin}");
-} elseif ($isDebug && ($CORS_ALLOW_ORIGINS === '*' || empty($allowedOrigins))) {
-    // Only allow wildcard in debug mode
-    header("Access-Control-Allow-Origin: *");
-}
-header("Access-Control-Allow-Headers: {$CORS_ALLOW_HEADERS}");
-header("Access-Control-Allow-Methods: {$CORS_ALLOW_METHODS}");
-header("Access-Control-Allow-Credentials: true");
+    // Only allow explicitly whitelisted origins (no wildcard in production)
+    $isDebug = ($_ENV['APP_DEBUG'] ?? 'false') === 'true';
+    if ($origin && in_array($origin, $allowedOrigins, true)) {
+        header("Access-Control-Allow-Origin: {$origin}");
+    } elseif ($isDebug && ($CORS_ALLOW_ORIGINS === '*' || empty($allowedOrigins))) {
+        // Only allow wildcard in debug mode
+        header("Access-Control-Allow-Origin: *");
+    }
+    header("Access-Control-Allow-Headers: {$CORS_ALLOW_HEADERS}");
+    header("Access-Control-Allow-Methods: {$CORS_ALLOW_METHODS}");
+    header("Access-Control-Allow-Credentials: true");
 
-// Handle preflight OPTIONS request (short-circuit)
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
+    // Handle preflight OPTIONS request (short-circuit)
+    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+        http_response_code(200);
+        exit;
+    }
 }
 
 // ---- Helper: jsonResponse (keeps signature and behavior) ----

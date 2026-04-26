@@ -12,6 +12,7 @@
  */
 
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../services/AuditService.php';
 
 use Twilio\Rest\Client;
 
@@ -23,16 +24,18 @@ class WhatsAppService
     private $logoUrl;
     private $enabled;
     private $logger;
+    private $pdo;
 
-    public function __construct($logger = null)
+    public function __construct($logger = null, $pdo = null)
     {
         $this->logger = $logger;
+        $this->pdo = $pdo;
         
         // Load environment variables
         $accountSid = getenv('TWILIO_ACCOUNT_SID');
         $authToken = getenv('TWILIO_AUTH_TOKEN');
         $this->from = getenv('TWILIO_WHATSAPP_FROM') ?: 'whatsapp:+14155238886';
-        $this->instituteName = getenv('INSTITUTE_NAME') ?: 'Guru Tegh Bahadur Khalsa College';
+        $this->instituteName = getenv('INSTITUTE_NAME') ?: 'GTB Dhaka College';
         $this->logoUrl = getenv('INSTITUTE_LOGO_URL') ?: '';
 
         // Check if Twilio is configured
@@ -205,10 +208,55 @@ class WhatsAppService
             $message = $this->client->messages->create($to, $options);
 
             $this->log("WhatsApp {$type} message sent successfully. SID: {$message->sid}");
+            
+            // Audit logging (safe - wrapped in try-catch)
+            if ($this->pdo) {
+                try {
+                    $audit = new AuditService($this->pdo, $this->logger);
+                    $audit->logNotification(
+                        null, // recipient_id (unknown at this level)
+                        'student', // recipient_type
+                        strtolower($type), // notification_type
+                        'whatsapp', // channel
+                        'sent', // status
+                        [
+                            'recipient_phone' => $phone,
+                            'message_body' => substr($body, 0, 500), // Limit to 500 chars
+                            'provider' => 'twilio',
+                            'provider_message_id' => $message->sid
+                        ]
+                    );
+                } catch (Exception $e) {
+                    $this->log("Audit logging failed (non-critical): " . $e->getMessage(), 'warning');
+                }
+            }
+            
             return true;
 
         } catch (Exception $e) {
             $this->log("Failed to send {$type} WhatsApp to {$phone}: " . $e->getMessage(), 'error');
+            
+            // Audit logging for failed notification
+            if ($this->pdo) {
+                try {
+                    $audit = new AuditService($this->pdo, $this->logger);
+                    $audit->logNotification(
+                        null,
+                        'student',
+                        strtolower($type),
+                        'whatsapp',
+                        'failed',
+                        [
+                            'recipient_phone' => $phone,
+                            'error_message' => $e->getMessage(),
+                            'provider' => 'twilio'
+                        ]
+                    );
+                } catch (Exception $e2) {
+                    $this->log("Audit logging failed (non-critical): " . $e2->getMessage(), 'warning');
+                }
+            }
+            
             return false;
         }
     }

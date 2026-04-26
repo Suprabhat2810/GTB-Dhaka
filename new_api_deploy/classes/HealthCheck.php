@@ -161,10 +161,10 @@ class HealthCheck
             // Get database version
             $version = $pdo->query('SELECT VERSION()')->fetchColumn();
             
-            // Check required tables
+            // Check required tables (core tables only)
             $requiredTables = [
-                'students', 'users', 'documents', 'payments', 
-                'approvals', 'subject_allocations', 'notifications'
+                'students', 'admins', 'documents', 'payments', 
+                'approvals', 'student_subjects', 'notifications', 'subjects'
             ];
             
             $existingTables = [];

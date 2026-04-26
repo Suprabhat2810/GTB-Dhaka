@@ -152,7 +152,7 @@ try {
                 $student = $stmt->fetch(PDO::FETCH_ASSOC);
                 
                 if ($student && !empty($student['phone'])) {
-                    $whatsappService = new WhatsAppService($logger);
+                    $whatsappService = new WhatsAppService($logger, $pdo);
                     if ($whatsappService->isEnabled()) {
                         $whatsappService->sendApprovalMessage(
                             $student['phone'],
